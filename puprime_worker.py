@@ -300,15 +300,16 @@ async def upsert_rows(rows):
 
 
 async def scrape_once():
-    required = (
-        SUPABASE_URL,
-        SUPABASE_KEY,
-        SUPABASE_WORKER_SECRET,
-        PU_EMAIL,
-        PU_PASSWORD,
-    )
-    if not all(required):
-        raise RuntimeError("missing required worker settings")
+    required = {
+        "SUPABASE_URL": SUPABASE_URL,
+        "SUPABASE_ANON_KEY": SUPABASE_KEY,
+        "SUPABASE_WORKER_SECRET": SUPABASE_WORKER_SECRET,
+        "PU_EMAIL": PU_EMAIL,
+        "PU_PASSWORD": PU_PASSWORD,
+    }
+    missing = sorted(name for name, value in required.items() if not value)
+    if missing:
+        raise RuntimeError(f"missing required worker settings: {','.join(missing)}")
 
     buckets = {ib: [] for ib in IBS}
     endpoint_counts = {ib: {} for ib in IBS}
