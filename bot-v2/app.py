@@ -17,7 +17,17 @@ SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID", "")
 CRM_TRACKING_SECRET = os.environ.get("CRM_TRACKING_SECRET", "")
 CRM_TENANT_SLUG = os.environ.get("CRM_TENANT_SLUG", "xau-machine")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5.6-luna").strip()
 CRM_HEADERS = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}", "Content-Type": "application/json", "Prefer": "return=minimal"}
+
+AI_RUNTIME_RULES = """Sei l'assistente commerciale ufficiale di XAU Machine su Telegram.
+Rispondi in modo naturale, fluido e breve nella lingua usata dal cliente.
+Non chiedere al cliente di usare comandi: i comandi sono riservati all'amministratore.
+Segui il prompt commerciale del CRM e usa lo storico della conversazione.
+Non inventare verifiche IB, depositi, risultati, saldi o rendimenti. Non promettere guadagni
+e spiega con chiarezza che il trading comporta il rischio di perdita. Se non hai un dato
+reale o non sai rispondere, proponi il passaggio a un operatore umano."""
 
 DEFAULT_WELCOME_MESSAGE = "Ciao 👋 Benvenuto in XAU Machine! 🚀\n\nSe hai già le idee chiare e vuoi unirti a noi, ecco il percorso rapido 👇\n\n🆕 DEVI ANCORA REGISTRARTI?\n\n🔗 Registrati su PU Prime da questo link:\nhttps://puvip.co/la-partners/Pvzi1lQC\n\n• Lascia vuoto “Codice di riferimento”\n• Completa la verifica del documento\n• Inviami Nome e Cognome per controllare il collegamento ✅\n\n⚠️ Non depositare ancora: aspetta la mia conferma e la guida per aprire il conto corretto:\n\n• Copy Popular Trading\n• Standard\n• Valuta EUR\n• Nessun voucher\n\n♻️ HAI GIÀ PU PRIME?\n\nScrivimi prima di procedere. Ti guiderò nel trasferimento utilizzando il codice IB:\n\n👉 23217421\n\n📊 SALA SEGNALI\n\nPuoi entrare gratuitamente per 7 giorni e copiare tutti i nostri segnali 👇\n\nhttps://t.me/+-e1_tDFps0Q2YmE0\n\nSe vuoi iniziare subito, scrivimi cosa hai già fatto. Se invece vuoi conoscere risultati, rischi, differenze tra bot e sala segnali o capire come funziona tutto, chiedimi pure liberamente 😊"
 
@@ -120,6 +130,34 @@ async def attendi_e_invia_screenshot(context: ContextTypes.DEFAULT_TYPE, chat_id
         riga = righe[0]
         stato = riga.get("stato")
         if stato == "fatto" and riga.get("immagine_url"):
+            # Un'immagine con tutti i valori a zero indica normalmente che il
+            # terminale MT5 della VPS non e' autenticato sul conto corretto.
+            # Non va mai presentata al cliente come "conto reale".
+            try:
+                metriche_valide = (
+                    abs(float(riga.get("profitto") or 0)) > 0.000001
+                    or abs(float(riga.get("percentuale") or 0)) > 0.000001
+                    or int(riga.get("operazioni") or 0) > 0
+                )
+            except (TypeError, ValueError):
+                metriche_valide = False
+            if not metriche_valide:
+                log.error("Snapshot MT5 %s rifiutato: dati tutti a zero", riga_id)
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=("Il terminale MT5 non sta restituendo dati validi del conto. "
+                          "Non ti mando uno screenshot vuoto: ho avvisato l'operatore "
+                          "per controllare la connessione."),
+                )
+                if ADMIN_CHAT_ID:
+                    try:
+                        await context.bot.send_message(
+                            chat_id=int(ADMIN_CHAT_ID),
+                            text=f"⚠️ Snapshot MT5 {riga_id}: terminale/conto non valido (tutti i dati a zero).",
+                        )
+                    except Exception:
+                        pass
+                return
             try:
                 await context.bot.send_photo(
                     chat_id=chat_id, photo=riga["immagine_url"],
@@ -161,7 +199,7 @@ async def richiedi_screenshot_mt5(update: Update, context: ContextTypes.DEFAULT_
     if msg is None or chat is None:
         return
     user = update.effective_user
-    await record_message(update)
+    await record_message(update, "in", testo_originale, "lead")
     riga = await crea_richiesta_screenshot({
         "telegram_chat_id": chat.id,
         "telegram_user_id": user.id if user else None,
@@ -172,8 +210,9 @@ async def richiedi_screenshot_mt5(update: Update, context: ContextTypes.DEFAULT_
     if not riga or not riga.get("id"):
         await msg.reply_text("Non sono riuscito a registrare la richiesta, riprova tra poco o scrivi /intervento_umano.")
         return
-    await msg.reply_text("Un attimo, controllo il conto… 📊")
-    await record_message(update, "out")
+    attesa = "Un attimo, controllo il conto reale… 📊"
+    await msg.reply_text(attesa)
+    await record_message(update, "out", attesa, "ai")
     asyncio.create_task(attendi_e_invia_screenshot(context, chat.id, riga["id"]))
 
 
@@ -220,12 +259,93 @@ async def crm_insert(table, payload):
         if r.status_code >= 300:
             log.warning("CRM %s %s: %s", table, r.status_code, r.text[:300])
 
-async def record_message(update: Update, direction="in"):
+
+async def record_message(update: Update, direction="in", body: str | None = None,
+                         sender_type: str | None = None) -> dict:
+    """Registra il messaggio nel CRM e restituisce prompt + memoria recente.
+
+    La scrittura diretta precedente usava colonne che non esistono. Questa RPC
+    protetta crea/aggiorna lead e conversazione e mantiene la memoria anche dopo
+    un riavvio di Railway.
+    """
     if not update.effective_user or not update.effective_chat:
-        return
-    text = update.effective_message.text if update.effective_message else ""
-    chat_id = str(update.effective_chat.id)
-    await crm_insert("crm_messages", {"telegram_chat_id": chat_id, "direction": direction, "content": text or "", "created_at": datetime.now(timezone.utc).isoformat()})
+        return {}
+    user = update.effective_user
+    if body is None:
+        body = update.effective_message.text if update.effective_message else ""
+    payload = {
+        "p_secret": CRM_TRACKING_SECRET,
+        "p_tenant_slug": CRM_TENANT_SLUG,
+        "p_telegram_user_id": user.id,
+        "p_telegram_chat_id": update.effective_chat.id,
+        "p_full_name": user.full_name or "",
+        "p_username": user.username or "",
+        "p_direction": direction,
+        "p_body": (body or "")[:8000],
+        "p_sender_type": sender_type,
+    }
+    try:
+        headers = dict(CRM_HEADERS)
+        headers.pop("Prefer", None)
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.post(
+                f"{SUPABASE_URL}/rest/v1/rpc/crm_bot_message",
+                headers=headers, json=payload,
+            )
+        if r.status_code >= 300:
+            log.warning("CRM bot message %s: %s", r.status_code, r.text[:300])
+            return {}
+        return r.json() or {}
+    except Exception as exc:
+        log.warning("CRM bot message non disponibile: %s", exc)
+        return {}
+
+
+def _testo_risposta_openai(data: dict) -> str:
+    parti = []
+    for item in data.get("output") or []:
+        if item.get("type") != "message":
+            continue
+        for content in item.get("content") or []:
+            if content.get("type") == "output_text" and content.get("text"):
+                parti.append(content["text"])
+    return "\n".join(parti).strip()
+
+
+async def genera_risposta_ai(testo: str, contesto: dict) -> str:
+    if not OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY non configurata su Railway")
+    prompt_crm = (contesto.get("prompt") or "").strip()
+    instructions = AI_RUNTIME_RULES
+    if prompt_crm:
+        instructions += "\n\nPROMPT COMMERCIALE ATTIVO DAL CRM:\n" + prompt_crm
+    history = contesto.get("history") or []
+    input_items = []
+    for item in history[-20:]:
+        role = item.get("role")
+        content = (item.get("content") or "").strip()
+        if role in ("user", "assistant") and content:
+            input_items.append({"role": role, "content": content[:8000]})
+    if not input_items or input_items[-1].get("role") != "user":
+        input_items.append({"role": "user", "content": testo[:8000]})
+    async with httpx.AsyncClient(timeout=45) as client:
+        r = await client.post(
+            "https://api.openai.com/v1/responses",
+            headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
+            json={
+                "model": OPENAI_MODEL,
+                "instructions": instructions,
+                "input": input_items,
+                "reasoning": {"effort": "low"},
+                "max_output_tokens": 700,
+            },
+        )
+    if r.status_code >= 300:
+        raise RuntimeError(f"OpenAI {r.status_code}: {r.text[:240]}")
+    risposta = _testo_risposta_openai(r.json())
+    if not risposta:
+        raise RuntimeError("OpenAI non ha restituito testo")
+    return risposta
 
 async def track_start(update: Update, deep_link_code: str):
     if not CRM_TRACKING_SECRET or not update.effective_user or not update.effective_chat:
@@ -257,10 +377,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     deep_link_code = context.args[0] if context.args else "tg_direct"
     await track_start(update, deep_link_code)
-    await record_message(update)
+    await record_message(update, "in", msg.text or "/start", "lead")
     welcome_message = await get_welcome_message(deep_link_code)
     await msg.reply_text(welcome_message, disable_web_page_preview=True)
-    await record_message(update, "out")
+    await record_message(update, "out", welcome_message, "ai")
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
@@ -272,9 +392,9 @@ async def simple_reply(update, text):
     msg = update.effective_message
     if msg is None:
         return
-    await record_message(update)
+    await record_message(update, "in", msg.text or "", "lead")
     await msg.reply_text(text)
-    await record_message(update, "out")
+    await record_message(update, "out", text, "ai")
 
 async def registration(update, context): await simple_reply(update, "Per registrarti usa il link PU Prime indicato dal tuo referente. Dopo l'iscrizione scrivi qui e verifichiamo l'IB.")
 async def signals(update, context): await simple_reply(update, "La sala segnali pubblica operazioni e risultati. Posso spiegarti differenze, rischi e modalità di accesso.")
@@ -310,9 +430,16 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if periodo:
         await richiedi_screenshot_mt5(update, context, periodo, testo)
         return
-    await record_message(update)
-    await msg.reply_text("Ho ricevuto il messaggio. Posso aiutarti con registrazione, sala segnali, verifica IB, deposito o passaggio a un operatore. Scrivi /help.")
-    await record_message(update, "out")
+    contesto = await record_message(update, "in", testo, "lead")
+    try:
+        risposta = await genera_risposta_ai(testo, contesto)
+    except Exception as exc:
+        log.error("Risposta AI non disponibile: %s", exc)
+        risposta = ("In questo momento l'assistente automatico non riesce a rispondere. "
+                    "Ho segnalato il problema: puoi riprovare tra poco oppure chiedermi "
+                    "di parlare con un operatore.")
+    await msg.reply_text(risposta, disable_web_page_preview=True)
+    await record_message(update, "out", risposta, "ai")
 
 async def on_error(update, context: ContextTypes.DEFAULT_TYPE):
     """Rete di sicurezza: qualunque eccezione non prevista finisce qui
