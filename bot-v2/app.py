@@ -1,4 +1,5 @@
 import os
+import asyncio
 import logging
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -15,9 +16,166 @@ SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID", "")
 CRM_TRACKING_SECRET = os.environ.get("CRM_TRACKING_SECRET", "")
+CRM_TENANT_SLUG = os.environ.get("CRM_TENANT_SLUG", "xau-machine")
 CRM_HEADERS = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}", "Content-Type": "application/json", "Prefer": "return=minimal"}
 
 DEFAULT_WELCOME_MESSAGE = "Ciao 👋 Benvenuto in XAU Machine! 🚀\n\nSe hai già le idee chiare e vuoi unirti a noi, ecco il percorso rapido 👇\n\n🆕 DEVI ANCORA REGISTRARTI?\n\n🔗 Registrati su PU Prime da questo link:\nhttps://puvip.co/la-partners/Pvzi1lQC\n\n• Lascia vuoto “Codice di riferimento”\n• Completa la verifica del documento\n• Inviami Nome e Cognome per controllare il collegamento ✅\n\n⚠️ Non depositare ancora: aspetta la mia conferma e la guida per aprire il conto corretto:\n\n• Copy Popular Trading\n• Standard\n• Valuta EUR\n• Nessun voucher\n\n♻️ HAI GIÀ PU PRIME?\n\nScrivimi prima di procedere. Ti guiderò nel trasferimento utilizzando il codice IB:\n\n👉 23217421\n\n📊 SALA SEGNALI\n\nPuoi entrare gratuitamente per 7 giorni e copiare tutti i nostri segnali 👇\n\nhttps://t.me/+-e1_tDFps0Q2YmE0\n\nSe vuoi iniziare subito, scrivimi cosa hai già fatto. Se invece vuoi conoscere risultati, rischi, differenze tra bot e sala segnali o capire come funziona tutto, chiedimi pure liberamente 😊"
+
+# ---------------------------------------------------------- richieste MT5
+# Parole/frasi che fanno riconoscere una richiesta di vedere l'andamento
+# del conto reale, in testo libero (nessun comando obbligatorio).
+_PAROLE_SCREENSHOT = (
+    "screenshot", "screen shot", "uno screen", "una foto del conto",
+    "vedere il conto", "vedi il conto", "far vedere il conto",
+    "come sta andando", "come va il conto", "come vanno i risultati",
+    "com'è andato", "come è andato", "com'e' andato",
+    "andamento", "risultato di oggi",
+    "risultati di oggi", "risultato della settimana", "risultato del mese",
+    "quanto ha fatto", "quanto sta facendo", "saldo del conto",
+    "aggiornamento del conto", "stato del conto",
+    "mandami", "fammi vedere", "mostrami",
+)
+_PAROLE_PERIODO = (
+    ("ultimi 6 mesi", "6mesi"), ("6 mesi", "6mesi"), ("sei mesi", "6mesi"),
+    ("questo mese", "mese"), ("del mese", "mese"), ("mensile", "mese"), ("mese", "mese"),
+    ("settimanale", "settimana"), ("settimana", "settimana"),
+    ("oggi", "oggi"), ("giornata", "oggi"), ("giornaliero", "oggi"),
+)
+
+
+def rileva_richiesta_screenshot(testo: str) -> str | None:
+    """Ritorna il periodo richiesto ('oggi'/'settimana'/'mese'/'6mesi') se il
+    messaggio sembra chiedere l'andamento del conto, altrimenti None.
+    Riconoscimento a parole chiave: nessuna chiamata AI, cosi' resta
+    veloce, gratuito e prevedibile per un'intenzione cosi' specifica."""
+    t = (testo or "").strip().lower()
+    if not t:
+        return None
+    if not any(p in t for p in _PAROLE_SCREENSHOT):
+        return None
+    for chiave, periodo in _PAROLE_PERIODO:
+        if chiave in t:
+            return periodo
+    return "oggi"
+
+
+async def crea_richiesta_screenshot(table_row: dict) -> dict | None:
+    """Crea una richiesta tramite RPC protetta.
+
+    Railway non riceve la service_role: usa la stessa chiave pubblicabile
+    delle altre RPC e il segreto runtime del tenant.
+    """
+    try:
+        headers = dict(CRM_HEADERS)
+        headers.pop("Prefer", None)
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.post(
+                f"{SUPABASE_URL}/rest/v1/rpc/crm_request_mt5_snapshot",
+                headers=headers,
+                json={
+                    "p_secret": CRM_TRACKING_SECRET,
+                    "p_tenant_slug": CRM_TENANT_SLUG,
+                    "p_telegram_chat_id": table_row["telegram_chat_id"],
+                    "p_telegram_user_id": table_row.get("telegram_user_id"),
+                    "p_periodo": table_row.get("periodo", "oggi"),
+                    "p_richiesta_testo": table_row.get("richiesta_testo", ""),
+                },
+            )
+        if r.status_code >= 300:
+            log.warning("MT5 snapshot RPC insert %s: %s", r.status_code, r.text[:300])
+            return None
+        request_id = r.json()
+        return {"id": request_id} if request_id else None
+    except Exception as exc:
+        log.warning("MT5 snapshot RPC insert non riuscito: %s", exc)
+        return None
+
+
+async def attendi_e_invia_screenshot(context: ContextTypes.DEFAULT_TYPE, chat_id: int,
+                                      riga_id: str, tentativi_max: int = 20,
+                                      attesa_secondi: float = 3.0) -> None:
+    """Fa polling della riga finche' il worker MT5 sulla VPS non la segna
+    'fatto' (o 'errore'), poi manda la foto nella stessa chat. Timeout
+    totale: ~tentativi_max * attesa_secondi (default 60s)."""
+    for _ in range(tentativi_max):
+        await asyncio.sleep(attesa_secondi)
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                r = await client.get(
+                    f"{SUPABASE_URL}/rest/v1/rpc/crm_get_mt5_snapshot_request",
+                    headers=CRM_HEADERS,
+                    params={
+                        "p_secret": CRM_TRACKING_SECRET,
+                        "p_tenant_slug": CRM_TENANT_SLUG,
+                        "p_request_id": riga_id,
+                        "p_telegram_chat_id": str(chat_id),
+                    },
+                )
+            righe = r.json() if r.status_code < 300 else []
+        except Exception as exc:
+            log.warning("Polling richiesta MT5 fallito: %s", exc)
+            continue
+        if not righe:
+            continue
+        riga = righe[0]
+        stato = riga.get("stato")
+        if stato == "fatto" and riga.get("immagine_url"):
+            try:
+                await context.bot.send_photo(
+                    chat_id=chat_id, photo=riga["immagine_url"],
+                    caption="📊 Ecco l'andamento del conto reale.",
+                )
+            except Exception as exc:
+                log.warning("Invio foto MT5 fallito: %s", exc)
+                try:
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text="Ho lo screenshot pronto ma non riesco a mandartelo adesso: riprova tra poco.",
+                    )
+                except Exception:
+                    pass
+            return
+        if stato == "errore":
+            try:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text="Non sono riuscito a recuperare i dati del conto in questo momento. "
+                         "Ci riprovo tra poco, oppure scrivi /intervento_umano.",
+                )
+            except Exception:
+                pass
+            return
+    try:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="Ci sto mettendo più del previsto a recuperare i dati del conto: appena pronti te li mando qui.",
+        )
+    except Exception:
+        pass
+
+
+async def richiedi_screenshot_mt5(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                                   periodo: str, testo_originale: str = "") -> None:
+    msg = update.effective_message
+    chat = update.effective_chat
+    if msg is None or chat is None:
+        return
+    user = update.effective_user
+    await record_message(update)
+    riga = await crea_richiesta_screenshot({
+        "telegram_chat_id": chat.id,
+        "telegram_user_id": user.id if user else None,
+        "periodo": periodo,
+        "richiesta_testo": (testo_originale or "")[:500],
+        "stato": "pending",
+    })
+    if not riga or not riga.get("id"):
+        await msg.reply_text("Non sono riuscito a registrare la richiesta, riprova tra poco o scrivi /intervento_umano.")
+        return
+    await msg.reply_text("Un attimo, controllo il conto… 📊")
+    await record_message(update, "out")
+    asyncio.create_task(attendi_e_invia_screenshot(context, chat.id, riga["id"]))
+
 
 async def get_welcome_message(deep_link_code: str):
     """Read the active /start copy from the CRM, with a local fallback."""
@@ -94,30 +252,28 @@ async def track_start(update: Update, deep_link_code: str):
         log.warning("Campaign tracking unavailable: %s", exc)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.effective_message
-    if message is None:
-        log.info("Ignoring /start update without an effective message: %s", update.update_id)
+    msg = update.effective_message
+    if msg is None:
         return
     deep_link_code = context.args[0] if context.args else "tg_direct"
     await track_start(update, deep_link_code)
     await record_message(update)
     welcome_message = await get_welcome_message(deep_link_code)
-    await message.reply_text(welcome_message, disable_web_page_preview=True)
+    await msg.reply_text(welcome_message, disable_web_page_preview=True)
     await record_message(update, "out")
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.effective_message
-    if message is None:
+    msg = update.effective_message
+    if msg is None:
         return
-    await message.reply_text("/registrazione - link e procedura\n/sala_segnali - informazioni sala\n/verifica_ib - verifica iscrizione\n/deposito - stato deposito\n/guida_bot - guida accesso\n/screenshot - richiedi aggiornamento MT5\n/intervento_umano - parla con un operatore")
+    await msg.reply_text("/registrazione - link e procedura\n/sala_segnali - informazioni sala\n/verifica_ib - verifica iscrizione\n/deposito - stato deposito\n/guida_bot - guida accesso\n/screenshot - richiedi aggiornamento MT5\n/intervento_umano - parla con un operatore")
 
 async def simple_reply(update, text):
-    message = update.effective_message
-    if message is None:
-        log.info("Ignoring update without an effective message: %s", update.update_id)
+    msg = update.effective_message
+    if msg is None:
         return
     await record_message(update)
-    await message.reply_text(text)
+    await msg.reply_text(text)
     await record_message(update, "out")
 
 async def registration(update, context): await simple_reply(update, "Per registrarti usa il link PU Prime indicato dal tuo referente. Dopo l'iscrizione scrivi qui e verifichiamo l'IB.")
@@ -125,27 +281,43 @@ async def signals(update, context): await simple_reply(update, "La sala segnali 
 async def verify_ib(update, context): await simple_reply(update, "La verifica IB può richiedere tempo. Quando disponibile, invia uno screenshot dell'area conto e controlliamo il collegamento.")
 async def deposit(update, context): await simple_reply(update, "Per assistenza sul deposito non inviare password o codici. Posso passare la richiesta a un operatore.")
 async def guide(update, context): await simple_reply(update, "Quando l'iscrizione sotto l'IB è verificata, riceverai la guida di accesso al bot e alla sala.")
-async def screenshot(update, context): await simple_reply(update, "Richiesta screenshot MT5 registrata. Il worker VPS invierà l'ultimo risultato disponibile nel CRM.")
+
+async def screenshot(update, context):
+    msg = update.effective_message
+    testo = (msg.text if msg else "") or "/screenshot"
+    await richiedi_screenshot_mt5(update, context, "oggi", testo)
+
 async def human(update, context):
+    msg = update.effective_message
+    chat = update.effective_chat
+    if msg is None or chat is None:
+        return
     await record_message(update)
-    chat_id = str(update.effective_chat.id)
+    chat_id = str(chat.id)
     await crm_insert("crm_human_handoffs", {"reason": "Richiesta operatore dal bot v2", "priority": "high", "status": "open", "channels": ["telegram","email","whatsapp","ringover"], "metadata": {"telegram_chat_id": chat_id}})
-    message = update.effective_message
-    if message is not None:
-        await message.reply_text("Ho registrato la richiesta e avvisato l'operatore.")
+    await msg.reply_text("Ho registrato la richiesta e avvisato l'operatore.")
     if ADMIN_CHAT_ID:
         try:
             await context.bot.send_message(chat_id=int(ADMIN_CHAT_ID), text=f"Nuova richiesta operatore dal chat {chat_id}")
         except Exception as e: log.warning("Admin notification failed: %s", e)
 
 async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.effective_message
-    if message is None:
-        log.info("Ignoring text update without an effective message: %s", update.update_id)
+    msg = update.effective_message
+    if msg is None or not update.effective_chat:
+        return
+    testo = msg.text or ""
+    periodo = rileva_richiesta_screenshot(testo)
+    if periodo:
+        await richiedi_screenshot_mt5(update, context, periodo, testo)
         return
     await record_message(update)
-    await message.reply_text("Ho ricevuto il messaggio. Posso aiutarti con registrazione, sala segnali, verifica IB, deposito o passaggio a un operatore. Scrivi /help.")
+    await msg.reply_text("Ho ricevuto il messaggio. Posso aiutarti con registrazione, sala segnali, verifica IB, deposito o passaggio a un operatore. Scrivi /help.")
     await record_message(update, "out")
+
+async def on_error(update, context: ContextTypes.DEFAULT_TYPE):
+    """Rete di sicurezza: qualunque eccezione non prevista finisce qui
+    invece di far cadere il processo o restare silenziosa nei log."""
+    log.error("Aggiornamento non gestito: %s", update, exc_info=context.error)
 
 async def post_init(app):
     me = await app.bot.get_me()
@@ -154,6 +326,7 @@ async def post_init(app):
 def main():
     threading.Thread(target=start_health_server, daemon=True, name="healthcheck").start()
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+    app.add_error_handler(on_error)
     for cmd, fn in {"start":start,"help":help_cmd,"registrazione":registration,"sala_segnali":signals,"verifica_ib":verify_ib,"deposito":deposit,"guida_bot":guide,"screenshot":screenshot,"intervento_umano":human}.items():
         app.add_handler(CommandHandler(cmd, fn))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message))
