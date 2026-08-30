@@ -14,7 +14,8 @@ import type { AuthChangeEvent, Session } from "@supabase/supabase-js";
 type Lead = { id: string; full_name: string | null; language: string; status: string; first_source: string; deposit_total: number; rebate_total: number; puprime_status: string };
 type Campaign = { id: string; name: string; language: string; source_channel: string | null; deep_link_code: string | null; active: boolean };
 type Tenant = { id: string; slug: string; name: string; status: string; plan_code: string; role?: string };
-type PageKey = "dashboard"|"leads"|"conversations"|"followups"|"handoffs"|"campaigns"|"puprime"|"mt5"|"economics"|"prompt"|"materials"|"integrations"|"tenants"|"billing"|"settings";
+type TenantBot = { id: string; name: string; username: string | null; mode: string; status: string; admin_chat_id: string | null; default_language: string; last_tested_at: string | null; last_error: string | null };
+type PageKey = "dashboard"|"leads"|"conversations"|"followups"|"handoffs"|"campaigns"|"puprime"|"mt5"|"economics"|"prompt"|"materials"|"integrations"|"bots"|"tenants"|"billing"|"settings";
 
 const nav: Array<{ key: PageKey; label: string; icon: typeof Gauge }> = [
   { key:"dashboard", label:"Panoramica", icon:LayoutDashboard }, { key:"leads", label:"Lead e pipeline", icon:Users },
@@ -23,6 +24,7 @@ const nav: Array<{ key: PageKey; label: string; icon: typeof Gauge }> = [
   { key:"puprime", label:"PU Prime", icon:ShieldCheck }, { key:"mt5", label:"MT5 e risultati", icon:ChartNoAxesCombined },
   { key:"economics", label:"Costi, CPA e rebate", icon:CircleDollarSign }, { key:"prompt", label:"Prompt AI", icon:Sparkles },
   { key:"materials", label:"Materiali e guide", icon:FileText }, { key:"integrations", label:"Integrazioni", icon:Plug },
+  { key:"bots", label:"Bot white label", icon:Bot },
   { key:"tenants", label:"Clienti CRM", icon:Building2 }, { key:"billing", label:"Piani e licenze", icon:CreditCard },
   { key:"settings", label:"Impostazioni", icon:Settings },
 ];
@@ -39,6 +41,7 @@ export default function CrmApp() {
   const [tenant, setTenant] = useState<Tenant | null>(demo ? { id:"00000000-0000-4000-8000-000000000002", slug:"demo", name:"XAU Machine Demo", status:"demo", plan_code:"demo", role:"viewer" } : null);
   const [leads, setLeads] = useState<Lead[]>(demoLeads as Lead[]);
   const [campaigns, setCampaigns] = useState<Campaign[]>(demoCampaigns as Campaign[]);
+  const [bots, setBots] = useState<TenantBot[]>(demo ? [{id:"demo-bot",name:"Demo Trading",username:"@DemoTradingBot",mode:"white_label",status:"active",admin_chat_id:null,default_language:"it",last_tested_at:null,last_error:null}] : []);
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
@@ -59,11 +62,12 @@ export default function CrmApp() {
       if (first) {
         const current: Tenant = { id:first.tenant_id, slug:first.tenant_slug, name:first.tenant_name, status:first.tenant_status, plan_code:first.plan_code, role:first.member_role };
         setTenant(current);
-        const [leadRes, campaignRes] = await Promise.all([
+        const [leadRes, campaignRes, botRes] = await Promise.all([
           supabase.from("crm_leads").select("id,full_name,language,status,first_source,deposit_total,rebate_total,puprime_status").eq("tenant_id", current.id).order("created_at", { ascending:false }).limit(100),
           supabase.from("crm_campaigns").select("id,name,language,source_channel,deep_link_code,active").eq("tenant_id", current.id).order("name"),
+          supabase.from("crm_tenant_bots").select("id,name,username,mode,status,admin_chat_id,default_language,last_tested_at,last_error").eq("tenant_id", current.id).order("created_at"),
         ]);
-        setLeads((leadRes.data || []) as Lead[]); setCampaigns((campaignRes.data || []) as Campaign[]);
+        setLeads((leadRes.data || []) as Lead[]); setCampaigns((campaignRes.data || []) as Campaign[]); setBots((botRes.data || []) as TenantBot[]);
       }
       setLoading(false);
     };
@@ -89,7 +93,7 @@ export default function CrmApp() {
     <main>
       <header><button className="iconBtn mobileMenu" onClick={()=>setMenu(true)}><Menu/></button><div><p>XAU Machine / {title}</p><h1>{title}</h1></div><div className="headerActions"><span className={demo?"mode demo":"mode"}>{demo?"DEMO":"LIVE"}</span><button className="iconBtn"><BellRing/></button><div className="avatar">GO</div></div></header>
       {demo && <div className="demoBanner"><b>Modalità demo in sola lettura.</b> I dati sono dimostrativi e non rappresentano clienti reali.</div>}
-      <section className="content">{loading ? <div className="loadingCard">Aggiornamento dati…</div> : <Page page={page} leads={leads} campaigns={campaigns} tenant={tenant} demo={demo}/>}</section>
+      <section className="content">{loading ? <div className="loadingCard">Aggiornamento dati…</div> : <Page page={page} leads={leads} campaigns={campaigns} bots={bots} onBotsChange={setBots} tenant={tenant} demo={demo}/>}</section>
     </main>
   </div>;
 }
@@ -100,7 +104,7 @@ function Login({ onDemo }:{onDemo:()=>void}) {
   return <main className="loginPage"><div className="loginGlow"/><form className="loginCard" onSubmit={submit}><div className="loginLogo">X</div><p className="eyebrow">XAU MACHINE</p><h1>Il centro operativo<br/>del tuo business.</h1><p className="muted">Lead, conversazioni, follow-up, PU Prime, MT5 e campagne in un’unica piattaforma.</p><label>Email<input type="email" value={email} onChange={e=>setEmail(e.target.value)} required/></label><label>Password<input type="password" value={password} onChange={e=>setPassword(e.target.value)} required/></label>{error&&<div className="error">{error}</div>}<button className="primary" disabled={busy}>{busy?"Accesso…":"Accedi al CRM"}</button><button type="button" className="secondary" onClick={onDemo}>Apri demo in sola lettura</button><small>Accesso protetto · Dati isolati per cliente</small></form></main>;
 }
 
-function Page({page,leads,campaigns,tenant,demo}:{page:PageKey;leads:Lead[];campaigns:Campaign[];tenant:Tenant|null;demo:boolean}) {
+function Page({page,leads,campaigns,bots,onBotsChange,tenant,demo}:{page:PageKey;leads:Lead[];campaigns:Campaign[];bots:TenantBot[];onBotsChange:(bots:TenantBot[])=>void;tenant:Tenant|null;demo:boolean}) {
   switch(page){
     case "dashboard": return <Dashboard leads={leads} campaigns={campaigns}/>;
     case "leads": return <Leads leads={leads}/>;
@@ -114,6 +118,7 @@ function Page({page,leads,campaigns,tenant,demo}:{page:PageKey;leads:Lead[];camp
     case "prompt": return <Prompt demo={demo}/>;
     case "materials": return <Materials demo={demo}/>;
     case "integrations": return <Integrations tenant={tenant} demo={demo}/>;
+    case "bots": return <WhiteLabelBots tenant={tenant} bots={bots} onChange={onBotsChange} demo={demo}/>;
     case "tenants": return <Tenants current={tenant}/>;
     case "billing": return <Billing tenant={tenant}/>;
     case "settings": return <SettingsPage demo={demo}/>;
@@ -160,6 +165,38 @@ function Integrations({tenant,demo}:{tenant:Tenant|null;demo:boolean}){
   const [selected,setSelected]=useState<(typeof integrationCatalog)[number]|null>(null); const [values,setValues]=useState<Record<string,string>>({}); const [saving,setSaving]=useState(false); const [notice,setNotice]=useState("");
   const save=async(e:FormEvent)=>{e.preventDefault();if(!tenant||demo||!selected)return;const client=getSupabase();if(!client)return;setSaving(true);setNotice("");for(const [key] of selected.fields){const secret=values[key];if(!secret)continue;const {error}=await client.rpc("crm_set_integration_secret",{p_tenant_id:tenant.id,p_provider:selected.provider,p_key:key,p_secret:secret});if(error){setNotice(`Errore: ${error.message}`);setSaving(false);return;}}setNotice("Credenziali salvate nel Vault. I valori non saranno più mostrati.");setValues({});setSaving(false);};
   return <><div className="securityNote"><ShieldCheck/><div><b>Archivio credenziali protetto</b><p>I valori sensibili vengono cifrati in Supabase Vault e non sono mai restituiti al browser.</p></div></div><div className="cardGrid integrations">{integrationCatalog.map((item,i)=><div className="integration" key={item.provider}><div className="integrationIcon">{i===0?<Bot/>:<Plug/>}</div><div><h3>{item.name}</h3><p>{item.desc}</p></div><Status value={item.status==="Attivo"?"active":item.status==="Errore chiave"?"error":"not_configured"}/><button className="secondary small" disabled={demo} onClick={()=>{setSelected(item);setNotice("");setValues({});}}>Configura</button></div>)}</div>{selected&&<div className="modalBackdrop" onClick={()=>setSelected(null)}><form className="modal" onSubmit={save} onClick={e=>e.stopPropagation()}><div className="panelHead"><div><h2>{selected.name}</h2><p>Inserisci i valori: dopo il salvataggio non saranno più visibili.</p></div><button type="button" className="iconBtn" onClick={()=>setSelected(null)}><X/></button></div>{selected.fields.map(([key,label,type])=><label key={key}>{label}<input type={type} value={values[key]||""} onChange={e=>setValues(v=>({...v,[key]:e.target.value}))} required autoComplete="off"/></label>)}{notice&&<div className={notice.startsWith("Errore")?"error":"successNote"}>{notice}</div>}<div className="editorActions"><button type="button" className="secondary" onClick={()=>setSelected(null)}>Annulla</button><button className="primary" disabled={saving}>{saving?"Salvataggio…":"Salva nel Vault"}</button></div></form></div>}</>}
+
+function WhiteLabelBots({tenant,bots,onChange,demo}:{tenant:Tenant|null;bots:TenantBot[];onChange:(bots:TenantBot[])=>void;demo:boolean}){
+  const [open,setOpen]=useState(false);
+  const [form,setForm]=useState({name:"",username:"",token:"",adminChatId:"",language:"it"});
+  const [saving,setSaving]=useState(false);
+  const [notice,setNotice]=useState("");
+  const configure=async(e:FormEvent)=>{
+    e.preventDefault(); if(!tenant||demo)return;
+    const client=getSupabase(); if(!client)return;
+    setSaving(true); setNotice("");
+    const {data,error}=await client.rpc("crm_configure_tenant_bot",{
+      p_tenant_id:tenant.id,p_name:form.name,p_username:form.username,p_bot_token:form.token,
+      p_admin_chat_id:form.adminChatId||null,p_default_language:form.language,
+    });
+    if(error){setNotice(`Errore: ${error.message}`);setSaving(false);return;}
+    const saved=Array.isArray(data)?data[0]:data;
+    if(saved){
+      const bot:TenantBot={...saved,last_tested_at:null,last_error:null};
+      onChange([...bots.filter(item=>item.id!==bot.id&&item.username!==bot.username),bot]);
+    }
+    setForm({name:"",username:"",token:"",adminChatId:"",language:"it"});
+    setSaving(false); setOpen(false);
+  };
+  return <>
+    <div className="pageIntro"><div><h2>Bot Telegram personalizzati</h2><p>Ogni cliente B2B collega il proprio bot creato con BotFather. Nome, username, immagine e conversazioni restano associati esclusivamente al suo brand.</p></div><button className="primary small" disabled={demo} onClick={()=>{setOpen(true);setNotice("");}}>+ Collega bot cliente</button></div>
+    <div className="securityNote"><ShieldCheck/><div><b>Un token diverso per ogni azienda</b><p>Il token viene cifrato nel Vault. Il browser non può rileggerlo e gli altri clienti non possono vedere bot, chat o dati di questo tenant.</p></div></div>
+    <div className="botModes"><div><Bot/><span><b>White label</b><small>Brand, username e foto del cliente</small></span><Status value="active"/></div><div><Building2/><span><b>Motore centralizzato</b><small>Stesso codice, aggiornamenti e CRM gestiti da noi</small></span><Status value="active"/></div><div><ShieldCheck/><span><b>Dati isolati</b><small>Lead, chat e integrazioni separati per tenant</small></span><Status value="active"/></div></div>
+    <div className="cardGrid botCards">{bots.length===0?<div className="emptyState botEmpty"><Bot/><h3>Nessun bot collegato</h3><p>Crea un bot con BotFather e inserisci qui token e username. Dopo il provisioning lo stato passerà da configurato a online.</p><button className="secondary small" disabled={demo} onClick={()=>setOpen(true)}>Collega il primo bot</button></div>:bots.map(bot=><div className="tenantCard" key={bot.id}><div className="brandMark"><Bot/></div><div><h3>{bot.name}</h3><p>{bot.username||"Username da verificare"} · {bot.default_language.toUpperCase()}</p></div><Status value={bot.status}/><div className="miniStats"><span><b>{bot.mode==="white_label"?"White label":"Condiviso"}</b> modalità</span><span><b>{bot.admin_chat_id?"Sì":"No"}</b> notifiche admin</span><span><b>{bot.status==="active"?"Online":"Da avviare"}</b> runtime</span></div>{bot.last_error&&<div className="botError">{bot.last_error}</div>}</div>)}</div>
+    <div className="provisionNote"><Activity/><div><b>Stati operativi</b><p><strong>Configurato</strong>: token salvato. <strong>Online</strong>: worker dedicato avviato e webhook verificato. Il CRM non mostra mai il token dopo il salvataggio.</p></div></div>
+    {open&&<div className="modalBackdrop" onClick={()=>setOpen(false)}><form className="modal" onSubmit={configure} onClick={e=>e.stopPropagation()}><div className="panelHead"><div><h2>Collega bot white label</h2><p>Il cliente crea il bot su BotFather; qui colleghiamo il suo brand al tenant.</p></div><button type="button" className="iconBtn" onClick={()=>setOpen(false)}><X/></button></div><label>Nome del brand / bot<input value={form.name} onChange={e=>setForm(v=>({...v,name:e.target.value}))} placeholder="es. Leo Trading Support" required/></label><label>Username Telegram<input value={form.username} onChange={e=>setForm(v=>({...v,username:e.target.value}))} placeholder="@LeoTradingSupportBot" required/></label><label>Token BotFather<input type="password" value={form.token} onChange={e=>setForm(v=>({...v,token:e.target.value}))} placeholder="123456789:AA…" autoComplete="off" required/></label><label>Chat ID amministratore (facoltativo)<input value={form.adminChatId} onChange={e=>setForm(v=>({...v,adminChatId:e.target.value}))} placeholder="Canale notifiche operatore"/></label><label>Lingua predefinita<select value={form.language} onChange={e=>setForm(v=>({...v,language:e.target.value}))}><option value="it">Italiano</option><option value="en">English</option><option value="es">Español</option><option value="fr">Français</option><option value="de">Deutsch</option><option value="ru">Русский</option><option value="ar">العربية</option><option value="zh">中文</option><option value="no">Norsk</option></select></label>{notice&&<div className={notice.startsWith("Errore")?"error":"successNote"}>{notice}</div>}<div className="editorActions"><button type="button" className="secondary" onClick={()=>setOpen(false)}>Annulla</button><button className="primary" disabled={saving}>{saving?"Cifratura…":"Salva e prepara bot"}</button></div></form></div>}
+  </>;
+}
 function Tenants({current}:{current:Tenant|null}){return <><div className="pageIntro"><div><h2>Clienti e ambienti</h2><p>Ogni azienda vede esclusivamente lead, conversazioni, bot, campagne e integrazioni proprie.</p></div><button className="primary small">+ Nuovo cliente</button></div><div className="tenantCards"><div className="tenantCard"><div className="brandMark">X</div><div><h3>{current?.name}</h3><p>{current?.slug} · Piano {current?.plan_code}</p></div><Status value={current?.status||"active"}/><div className="miniStats"><span><b>Owner</b> ruolo</span><span><b>8</b> moduli</span><span><b>Live</b> ambiente</span></div></div><div className="tenantCard"><div className="brandMark demoMark">D</div><div><h3>XAU Machine Demo</h3><p>demo · Accesso view-only</p></div><Status value="demo"/><div className="miniStats"><span><b>Demo</b> piano</span><span><b>1</b> utente</span><span><b>Finto</b> dataset</span></div></div></div></>}
 function Billing({tenant}:{tenant:Tenant|null}){return <><div className="stats"><Stat label="Piano attuale" value={tenant?.plan_code.toUpperCase()||"FULL"} delta="Tutti i moduli" icon={<CreditCard/>}/><Stat label="Stato" value={tenant?.status||"active"} delta="Accesso operativo" icon={<ShieldCheck/>}/><Stat label="Licenze MT5" value="0" delta="Attive" icon={<FileText/>}/><Stat label="AI questo mese" value="€0" delta="Consumo tracciato" icon={<Sparkles/>}/></div><Panel title="Piani SaaS"><div className="planGrid">{[["CRM","Lead, campagne e operatori"],["CRM + AI","Chatbot e follow-up"],["Trading","MT5 e sala segnali"],["Full","PU Prime + tutto"],["White label","Brand personalizzato"]].map(([a,b])=><div key={a}><h3>{a}</h3><p>{b}</p><button className="secondary small">Configura prezzo</button></div>)}</div></Panel></>}
 function SettingsPage({demo}:{demo:boolean}){return <div className="settingsGrid"><Panel title="Brand e profilo"><label>Nome azienda<input defaultValue="XAU Machine" readOnly={demo}/></label><label>Email amministratore<input type="email" defaultValue="infogaetano@yahoo.it" readOnly={demo}/></label><label>Lingua predefinita<select disabled={demo}><option>Italiano</option><option>English</option></select></label><button className="primary small" disabled={demo}>Salva</button></Panel><Panel title="Sicurezza e accessi"><div className="settingRow"><span><b>Isolamento tenant</b><small>Row Level Security</small></span><Status value="active"/></div><div className="settingRow"><span><b>Demo</b><small>Sola lettura</small></span><Status value="active"/></div><div className="settingRow"><span><b>Audit log</b><small>Azioni amministratori</small></span><Status value="active"/></div><button className="secondary small">Gestisci team</button></Panel></div>}
