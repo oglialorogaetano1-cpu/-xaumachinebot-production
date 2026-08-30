@@ -4,20 +4,22 @@ import { FormEvent, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import {
   Activity, BarChart3, BellRing, Bot, Building2, ChartNoAxesCombined, CircleDollarSign,
-  CreditCard, FileText, Gauge, Languages, LayoutDashboard, LogOut, Menu,
+  ChevronLeft, CreditCard, FileText, Gauge, Languages, LayoutDashboard, LogOut, Menu,
   MessageCircle, Plug, Search, Settings, ShieldCheck, Sparkles, Users, Workflow, X,
 } from "lucide-react";
 import { getSupabase } from "@/lib/supabase";
-import { demoCampaigns, demoLeads } from "@/lib/demo";
+import { demoCampaigns, demoConversations, demoLeads } from "@/lib/demo";
 import type { AuthChangeEvent, Session } from "@supabase/supabase-js";
 
 type Lead = { id: string; full_name: string | null; language: string; status: string; first_source: string; deposit_total: number; rebate_total: number; puprime_status: string };
 type Campaign = { id: string; name: string; language: string; source_channel: string | null; deep_link_code: string | null; active: boolean };
 type Tenant = { id: string; slug: string; name: string; status: string; plan_code: string; role?: string };
 type TenantBot = { id: string; name: string; username: string | null; mode: string; status: string; admin_chat_id: string | null; default_language: string; last_tested_at: string | null; last_error: string | null };
-type PageKey = "dashboard"|"leads"|"conversations"|"followups"|"handoffs"|"campaigns"|"puprime"|"mt5"|"economics"|"prompt"|"materials"|"integrations"|"bots"|"tenants"|"billing"|"settings";
+type DemoConversation = (typeof demoConversations)[number];
+type PageKey = "vision"|"dashboard"|"leads"|"conversations"|"followups"|"handoffs"|"campaigns"|"puprime"|"mt5"|"economics"|"prompt"|"materials"|"integrations"|"bots"|"tenants"|"billing"|"settings";
 
 const nav: Array<{ key: PageKey; label: string; icon: typeof Gauge }> = [
+  { key:"vision", label:"B2B Vision Demo", icon:Gauge },
   { key:"dashboard", label:"Panoramica", icon:LayoutDashboard }, { key:"leads", label:"Lead e pipeline", icon:Users },
   { key:"conversations", label:"Conversazioni", icon:MessageCircle }, { key:"followups", label:"Follow-up", icon:Workflow },
   { key:"handoffs", label:"Intervento umano", icon:BellRing }, { key:"campaigns", label:"Campagne e lingue", icon:Languages },
@@ -36,7 +38,7 @@ export default function CrmApp() {
   const [demo, setDemo] = useState(params.get("demo") === "1");
   const [session, setSession] = useState<Session | null>(null);
   const [authReady, setAuthReady] = useState(false);
-  const [page, setPage] = useState<PageKey>("dashboard");
+  const [page, setPage] = useState<PageKey>(params.get("demo") === "1" ? "vision" : "dashboard");
   const [menu, setMenu] = useState(false);
   const [tenant, setTenant] = useState<Tenant | null>(demo ? { id:"00000000-0000-4000-8000-000000000002", slug:"demo", name:"XAU Machine Demo", status:"demo", plan_code:"demo", role:"viewer" } : null);
   const [leads, setLeads] = useState<Lead[]>(demoLeads as Lead[]);
@@ -93,7 +95,7 @@ export default function CrmApp() {
     <main>
       <header><button className="iconBtn mobileMenu" onClick={()=>setMenu(true)}><Menu/></button><div><p>XAU Machine / {title}</p><h1>{title}</h1></div><div className="headerActions"><span className={demo?"mode demo":"mode"}>{demo?"DEMO":"LIVE"}</span><button className="iconBtn"><BellRing/></button><div className="avatar">GO</div></div></header>
       {demo && <div className="demoBanner"><b>Modalità demo in sola lettura.</b> I dati sono dimostrativi e non rappresentano clienti reali.</div>}
-      <section className="content">{loading ? <div className="loadingCard">Aggiornamento dati…</div> : <Page page={page} leads={leads} campaigns={campaigns} bots={bots} onBotsChange={setBots} tenant={tenant} demo={demo}/>}</section>
+      <section className="content">{loading ? <div className="loadingCard">Aggiornamento dati…</div> : <Page page={page} onNavigate={setPage} leads={leads} campaigns={campaigns} bots={bots} onBotsChange={setBots} tenant={tenant} demo={demo}/>}</section>
     </main>
   </div>;
 }
@@ -104,12 +106,13 @@ function Login({ onDemo }:{onDemo:()=>void}) {
   return <main className="loginPage"><div className="loginGlow"/><form className="loginCard" onSubmit={submit}><div className="loginLogo">X</div><p className="eyebrow">XAU MACHINE</p><h1>Il centro operativo<br/>del tuo business.</h1><p className="muted">Lead, conversazioni, follow-up, PU Prime, MT5 e campagne in un’unica piattaforma.</p><label>Email<input type="email" value={email} onChange={e=>setEmail(e.target.value)} required/></label><label>Password<input type="password" value={password} onChange={e=>setPassword(e.target.value)} required/></label>{error&&<div className="error">{error}</div>}<button className="primary" disabled={busy}>{busy?"Accesso…":"Accedi al CRM"}</button><button type="button" className="secondary" onClick={onDemo}>Apri demo in sola lettura</button><small>Accesso protetto · Dati isolati per cliente</small></form></main>;
 }
 
-function Page({page,leads,campaigns,bots,onBotsChange,tenant,demo}:{page:PageKey;leads:Lead[];campaigns:Campaign[];bots:TenantBot[];onBotsChange:(bots:TenantBot[])=>void;tenant:Tenant|null;demo:boolean}) {
+function Page({page,onNavigate,leads,campaigns,bots,onBotsChange,tenant,demo}:{page:PageKey;onNavigate:(page:PageKey)=>void;leads:Lead[];campaigns:Campaign[];bots:TenantBot[];onBotsChange:(bots:TenantBot[])=>void;tenant:Tenant|null;demo:boolean}) {
   switch(page){
+    case "vision": return <B2BVision leads={leads} campaigns={campaigns} onNavigate={onNavigate}/>;
     case "dashboard": return <Dashboard leads={leads} campaigns={campaigns}/>;
     case "leads": return <Leads leads={leads}/>;
     case "campaigns": return <Campaigns campaigns={campaigns}/>;
-    case "conversations": return <Conversations leads={leads}/>;
+    case "conversations": return <Conversations leads={leads} demo={demo}/>;
     case "followups": return <Followups/>;
     case "handoffs": return <Handoffs/>;
     case "puprime": return <PuPrime leads={leads}/>;
@@ -123,6 +126,19 @@ function Page({page,leads,campaigns,bots,onBotsChange,tenant,demo}:{page:PageKey
     case "billing": return <Billing tenant={tenant}/>;
     case "settings": return <SettingsPage demo={demo}/>;
   }
+}
+
+function B2BVision({leads,campaigns,onNavigate}:{leads:Lead[];campaigns:Campaign[];onNavigate:(page:PageKey)=>void}){
+  const deposits=leads.reduce((sum,lead)=>sum+Number(lead.deposit_total||0),0);
+  const rebates=leads.reduce((sum,lead)=>sum+Number(lead.rebate_total||0),0);
+  const verified=leads.filter(lead=>lead.puprime_status==="verified").length;
+  const conversion=Math.round(verified/Math.max(leads.length,1)*100);
+  return <>
+    <div className="visionHero"><div><span className="visionBadge">DEMO COMMERCIALE · DATI SIMULATI</span><h2>Mostra al cliente tutto il valore del CRM, in pochi secondi.</h2><p>Lead, conversazioni bilingui, automazioni, PU Prime, MT5, costi e bot white label in una vista completa e credibile.</p><div className="visionActions"><button className="primary bigAction" onClick={()=>onNavigate("conversations")}><MessageCircle/> Apri conversazioni</button><button className="secondary bigAction" onClick={()=>onNavigate("leads")}><Users/> Esplora i lead</button><button className="secondary bigAction" onClick={()=>onNavigate("bots")}><Bot/> Vedi white label</button></div></div><div className="visionScore"><small>Conversione demo</small><strong>{conversion}%</strong><span>Lead → cliente verificato</span><i><b style={{width:`${conversion}%`}}/></i></div></div>
+    <div className="stats visionStats"><Stat label="Lead acquisiti" value={String(leads.length)} delta="+18% ultimi 30 giorni" icon={<Users/>}/><Stat label="Depositi attribuiti" value={eur.format(deposits)} delta="Tutti i canali" icon={<CircleDollarSign/>}/><Stat label="Rebate generati" value={eur.format(rebates)} delta="Riepilogo 3 IB" icon={<Activity/>}/><Stat label="Chat aperte" value={String(demoConversations.length)} delta="Italiano + English" icon={<MessageCircle/>}/></div>
+    <div className="grid2 visionGrid"><Panel title="Funnel commerciale B2B" action="DATI DEMO"><Pipeline leads={leads}/><button className="panelCta" onClick={()=>onNavigate("followups")}>Gestisci follow-up <Workflow/></button></Panel><Panel title="Conversazioni recenti" action="LIVE DEMO"><div className="visionChats">{demoConversations.slice(0,5).map(chat=><button key={chat.id} onClick={()=>onNavigate("conversations")}><div className="avatar smallAvatar">{chat.name.split(" ").map(part=>part[0]).slice(0,2).join("")}</div><span><b>{chat.name}</b><small>{chat.messages.at(-1)?.text}</small></span><em className={`langPill ${chat.language}`}>{chat.language.toUpperCase()}</em>{chat.unread>0&&<i>{chat.unread}</i>}</button>)}</div></Panel></div>
+    <div className="grid2"><Panel title="Canali e campagne" action={`${campaigns.length} ATTIVE`}><div className="channelLeaderboard">{[["Leo Italia","IT",38,"€ 19,40"],["LeoTrading English","EN",31,"€ 24,10"],["Alice Trading","IT",24,"€ 21,80"],["New Zealand","EN",19,"€ 27,30"]].map(([name,language,leadsCount,cpa],index)=><div key={String(name)}><b>{index+1}</b><span><strong>{name}</strong><small>{language} · Telegram</small></span><em>{leadsCount} lead</em><i>{cpa} CPA</i></div>)}</div><button className="panelCta" onClick={()=>onNavigate("campaigns")}>Apri performance canali <BarChart3/></button></Panel><Panel title="Stato piattaforma" action="OPERATIVA"><SystemStatus/><div className="visionSystemActions"><button className="secondary" onClick={()=>onNavigate("integrations")}>Configura integrazioni</button><button className="primary" onClick={()=>onNavigate("handoffs")}>Interventi umani</button></div></Panel></div>
+  </>;
 }
 
 function Dashboard({leads,campaigns}:{leads:Lead[];campaigns:Campaign[]}) {
@@ -140,7 +156,14 @@ function SystemStatus(){return <div className="systems">{[["Telegram","Operativo
 function Leads({leads}:{leads:Lead[]}){return <Panel title="Lead e clienti" action={`${leads.length} risultati`}><div className="toolbar"><div className="search"><Search/><input placeholder="Cerca nome, account o Telegram…"/></div><button className="primary small">+ Nuovo lead</button></div><div className="table"><div className="tr th"><span>Cliente</span><span>Fase</span><span>Lingua</span><span>Deposito</span><span>PU Prime</span></div>{leads.map(l=><div className="tr" key={l.id}><span><b>{l.full_name||"Senza nome"}</b><small>{l.first_source}</small></span><span><Status value={l.status}/></span><span>{l.language.toUpperCase()}</span><span>{eur.format(Number(l.deposit_total||0))}</span><span><Status value={l.puprime_status}/></span></div>)}</div></Panel>}
 function Status({value}:{value:string}){return <em className={`status ${value}`}>{value.replaceAll("_"," ")}</em>}
 function Campaigns({campaigns}:{campaigns:Campaign[]}){return <><div className="pageIntro"><div><h2>Attribuzione automatica</h2><p>Ogni link Telegram identifica canale, lingua e campagna. Il messaggio di benvenuto parte nella lingua corretta.</p></div><button className="primary small">+ Crea campagna</button></div><div className="cardGrid">{campaigns.map(c=><div className="campaignCard" key={c.id}><div><span className="lang">{c.language.toUpperCase()}</span><Status value={c.active?"active":"paused"}/></div><h3>{c.name}</h3><p>Codice: <b>{c.deep_link_code}</b></p><code>t.me/XauMachineAisupport_bot?start={c.deep_link_code}</code><div className="miniStats"><span><b>0</b> lead</span><span><b>—</b> CPA</span><span><b>0%</b> conv.</span></div></div>)}</div></>}
-function Conversations({leads}:{leads:Lead[]}){return <div className="chatLayout"><div className="chatList"><div className="search"><Search/><input placeholder="Cerca chat…"/></div>{leads.map((l,i)=><button key={l.id} className={i===0?"chatRow selected":"chatRow"}><div className="avatar smallAvatar">{(l.full_name||"?").slice(0,2).toUpperCase()}</div><span><b>{l.full_name||"Senza nome"}</b><small>{i===0?"Vorrei capire come funziona…":"Conversazione Telegram"}</small></span><em>{i===0?"ora":"ieri"}</em></button>)}</div><div className="chatWindow"><div className="emptyChat"><MessageCircle/><h2>Conversazioni unificate</h2><p>Seleziona una chat per leggere la traduzione, rispondere come operatore o riattivare l’AI.</p><button className="primary small">Apri prima chat</button></div></div></div>}
+function Conversations({leads,demo}:{leads:Lead[];demo:boolean}){
+  const fallback:DemoConversation={id:"live",leadId:leads[0]?.id||"",name:leads[0]?.full_name||"Conversazione",language:leads[0]?.language||"it",stage:"Telegram",time:"ora",unread:0,messages:[{side:"lead",text:"Seleziona una conversazione per visualizzare i messaggi.",time:"ora"}]};
+  const chats=demo?demoConversations:[fallback];
+  const [selectedId,setSelectedId]=useState(chats[0]?.id||"");
+  const [mobileOpen,setMobileOpen]=useState(false);
+  const selected=chats.find(chat=>chat.id===selectedId)||chats[0];
+  return <div className={`chatLayout b2bChat ${mobileOpen?"mobileChatOpen":""}`}><div className="chatList"><div className="chatListHead"><b>Inbox</b><span>{chats.reduce((sum,chat)=>sum+chat.unread,0)} da leggere</span></div><div className="search"><Search/><input placeholder="Cerca chat…"/></div><div className="chatFilters"><button className="active">Tutte</button><button>IT</button><button>EN</button><button>Operatore</button></div>{chats.map(chat=><button key={chat.id} onClick={()=>{setSelectedId(chat.id);setMobileOpen(true);}} className={selected?.id===chat.id?"chatRow selected":"chatRow"}><div className="avatar smallAvatar">{chat.name.split(" ").map(part=>part[0]).slice(0,2).join("")}</div><span><b>{chat.name}</b><small>{chat.messages.at(-1)?.text}</small><i>{chat.stage}</i></span><em>{chat.time}{chat.unread>0&&<strong>{chat.unread}</strong>}</em></button>)}</div><div className="chatWindow">{selected&&<><div className="chatTop"><button className="iconBtn mobileChatBack" onClick={()=>setMobileOpen(false)} aria-label="Torna alle conversazioni"><ChevronLeft/></button><div className="avatar">{selected.name.split(" ").map(part=>part[0]).slice(0,2).join("")}</div><span><b>{selected.name}</b><small>Telegram · {selected.language==="it"?"Italiano":"English"} · {selected.stage}</small></span><div className="chatTopActions"><button className="secondary">Traduci pagina</button><button className="primary">Intervento umano</button></div></div><div className="messages">{selected.messages.map((message,index)=><div key={index} className={`message ${message.side}`}><small>{message.side==="ai"?"AI Assistant":selected.name}</small><p>{message.text}</p><time>{message.time}</time></div>)}</div><div className="quickActions"><button>Mostra risultati</button><button>Invia guida</button><button>Verifica IB</button><button>Programma follow-up</button></div><div className="composer"><textarea placeholder={demo?"Demo in sola lettura":"Scrivi una risposta…"} readOnly={demo}/><button className="primary" disabled={demo}>Invia</button></div></>}</div></div>;
+}
 function Followups(){return <><div className="pageIntro"><div><h2>Regole intelligenti per fase</h2><p>L’AI classifica l’esito; il motore applica tempi e condizioni senza invii duplicati.</p></div><button className="primary small">+ Nuova regola</button></div><div className="cardGrid"><Rule name="Assenza 2 ore" trigger="Nessuna risposta" when="Non registrato · nessun cambio IB" text="Avevi altre domande? Posso aiutarti o mostrarti qualche risultato?"/><Rule name="Cambio IB richiesto" trigger="Dopo 3 giorni" when="Cambio IB non confermato" text="Hai ricevuto l’email PU Prime o la conferma nell’area personale?"/><Rule name="Deposito mancante" trigger="Dopo verifica IB" when="IB verificato · deposito 0" text="Account corretto: posso guidarti nel prossimo passaggio."/></div></>}
 function Rule({name,trigger,when,text}:{name:string;trigger:string;when:string;text:string}){return <div className="rule"><div><Workflow/><Status value="active"/></div><h3>{name}</h3><b>{trigger}</b><small>{when}</small><p>“{text}”</p><button className="secondary small">Modifica regola</button></div>}
 function Handoffs(){return <><div className="stats"><Stat label="Da prendere" value="1" delta="Priorità alta" icon={<BellRing/>}/><Stat label="In gestione" value="0" delta="Operatori" icon={<Users/>}/><Stat label="Tempo medio" value="4 min" delta="Ultimi 7 giorni" icon={<Gauge/>}/><Stat label="Risolte" value="12" delta="Questa settimana" icon={<ShieldCheck/>}/></div><Panel title="Coda operatore"><div className="handoff"><div className="avatar">MR</div><div><b>Marco Rossi</b><p>L’AI richiede aiuto: domanda non gestita sul cambio IB.</p><small>Telegram · Italiano · 2 minuti fa</small></div><Status value="urgent"/><div className="rowActions"><button className="primary small">Prendi in carico</button><button className="secondary small">Chiama</button></div></div></Panel></>}
