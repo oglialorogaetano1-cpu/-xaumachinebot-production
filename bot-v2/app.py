@@ -19,7 +19,7 @@ CRM_HEADERS = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"
 
 DEFAULT_WELCOME_MESSAGE = "Ciao 👋 Benvenuto in XAU Machine! 🚀\n\nSe hai già le idee chiare e vuoi unirti a noi, ecco il percorso rapido 👇\n\n🆕 DEVI ANCORA REGISTRARTI?\n\n🔗 Registrati su PU Prime da questo link:\nhttps://puvip.co/la-partners/Pvzi1lQC\n\n• Lascia vuoto “Codice di riferimento”\n• Completa la verifica del documento\n• Inviami Nome e Cognome per controllare il collegamento ✅\n\n⚠️ Non depositare ancora: aspetta la mia conferma e la guida per aprire il conto corretto:\n\n• Copy Popular Trading\n• Standard\n• Valuta EUR\n• Nessun voucher\n\n♻️ HAI GIÀ PU PRIME?\n\nScrivimi prima di procedere. Ti guiderò nel trasferimento utilizzando il codice IB:\n\n👉 23217421\n\n📊 SALA SEGNALI\n\nPuoi entrare gratuitamente per 7 giorni e copiare tutti i nostri segnali 👇\n\nhttps://t.me/+-e1_tDFps0Q2YmE0\n\nSe vuoi iniziare subito, scrivimi cosa hai già fatto. Se invece vuoi conoscere risultati, rischi, differenze tra bot e sala segnali o capire come funziona tutto, chiedimi pure liberamente 😊"
 
-async def get_welcome_message():
+async def get_welcome_message(deep_link_code: str):
     """Read the active /start copy from the CRM, with a local fallback."""
     try:
         headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
@@ -27,7 +27,7 @@ async def get_welcome_message():
             r = await client.post(
                 f"{SUPABASE_URL}/rest/v1/rpc/crm_get_telegram_welcome",
                 headers=headers,
-                json={},
+                json={"p_deep_link_code": deep_link_code or "tg_direct"},
             )
         if r.status_code < 300:
             configured = r.json()
@@ -97,7 +97,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     deep_link_code = context.args[0] if context.args else "tg_direct"
     await track_start(update, deep_link_code)
     await record_message(update)
-    welcome_message = await get_welcome_message()
+    welcome_message = await get_welcome_message(deep_link_code)
     await update.message.reply_text(welcome_message, disable_web_page_preview=True)
     await record_message(update, "out")
 
