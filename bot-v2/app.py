@@ -94,19 +94,30 @@ async def track_start(update: Update, deep_link_code: str):
         log.warning("Campaign tracking unavailable: %s", exc)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.effective_message
+    if message is None:
+        log.info("Ignoring /start update without an effective message: %s", update.update_id)
+        return
     deep_link_code = context.args[0] if context.args else "tg_direct"
     await track_start(update, deep_link_code)
     await record_message(update)
     welcome_message = await get_welcome_message(deep_link_code)
-    await update.message.reply_text(welcome_message, disable_web_page_preview=True)
+    await message.reply_text(welcome_message, disable_web_page_preview=True)
     await record_message(update, "out")
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("/registrazione - link e procedura\n/sala_segnali - informazioni sala\n/verifica_ib - verifica iscrizione\n/deposito - stato deposito\n/guida_bot - guida accesso\n/screenshot - richiedi aggiornamento MT5\n/intervento_umano - parla con un operatore")
+    message = update.effective_message
+    if message is None:
+        return
+    await message.reply_text("/registrazione - link e procedura\n/sala_segnali - informazioni sala\n/verifica_ib - verifica iscrizione\n/deposito - stato deposito\n/guida_bot - guida accesso\n/screenshot - richiedi aggiornamento MT5\n/intervento_umano - parla con un operatore")
 
 async def simple_reply(update, text):
+    message = update.effective_message
+    if message is None:
+        log.info("Ignoring update without an effective message: %s", update.update_id)
+        return
     await record_message(update)
-    await update.message.reply_text(text)
+    await message.reply_text(text)
     await record_message(update, "out")
 
 async def registration(update, context): await simple_reply(update, "Per registrarti usa il link PU Prime indicato dal tuo referente. Dopo l'iscrizione scrivi qui e verifichiamo l'IB.")
@@ -119,15 +130,21 @@ async def human(update, context):
     await record_message(update)
     chat_id = str(update.effective_chat.id)
     await crm_insert("crm_human_handoffs", {"reason": "Richiesta operatore dal bot v2", "priority": "high", "status": "open", "channels": ["telegram","email","whatsapp","ringover"], "metadata": {"telegram_chat_id": chat_id}})
-    await update.message.reply_text("Ho registrato la richiesta e avvisato l'operatore.")
+    message = update.effective_message
+    if message is not None:
+        await message.reply_text("Ho registrato la richiesta e avvisato l'operatore.")
     if ADMIN_CHAT_ID:
         try:
             await context.bot.send_message(chat_id=int(ADMIN_CHAT_ID), text=f"Nuova richiesta operatore dal chat {chat_id}")
         except Exception as e: log.warning("Admin notification failed: %s", e)
 
 async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.effective_message
+    if message is None:
+        log.info("Ignoring text update without an effective message: %s", update.update_id)
+        return
     await record_message(update)
-    await update.message.reply_text("Ho ricevuto il messaggio. Posso aiutarti con registrazione, sala segnali, verifica IB, deposito o passaggio a un operatore. Scrivi /help.")
+    await message.reply_text("Ho ricevuto il messaggio. Posso aiutarti con registrazione, sala segnali, verifica IB, deposito o passaggio a un operatore. Scrivi /help.")
     await record_message(update, "out")
 
 async def post_init(app):
