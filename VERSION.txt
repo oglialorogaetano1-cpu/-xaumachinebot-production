@@ -1,0 +1,4 @@
+XAU Machine handoff
+Repository commit: 6f6ebad04d8b4514e04e456519be2a86cbdd3954
+Package date: 2026-08-30
+Contents: Telegram bot v2, PU Prime worker, environment template, Claude Cowork handoff and project status.
