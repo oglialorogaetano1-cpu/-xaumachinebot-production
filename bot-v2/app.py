@@ -16,6 +16,28 @@ SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID", "")
 CRM_HEADERS = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}", "Content-Type": "application/json", "Prefer": "return=minimal"}
 
+DEFAULT_WELCOME_MESSAGE = "Ciao 👋 Benvenuto in XAU Machine! 🚀\n\nSe hai già le idee chiare e vuoi unirti a noi, ecco il percorso rapido 👇\n\n🆕 DEVI ANCORA REGISTRARTI?\n\n🔗 Registrati su PU Prime da questo link:\nhttps://puvip.co/la-partners/Pvzi1lQC\n\n• Lascia vuoto “Codice di riferimento”\n• Completa la verifica del documento\n• Inviami Nome e Cognome per controllare il collegamento ✅\n\n⚠️ Non depositare ancora: aspetta la mia conferma e la guida per aprire il conto corretto:\n\n• Copy Popular Trading\n• Standard\n• Valuta EUR\n• Nessun voucher\n\n♻️ HAI GIÀ PU PRIME?\n\nScrivimi prima di procedere. Ti guiderò nel trasferimento utilizzando il codice IB:\n\n👉 23217421\n\n📊 SALA SEGNALI\n\nPuoi entrare gratuitamente per 7 giorni e copiare tutti i nostri segnali 👇\n\nhttps://t.me/+-e1_tDFps0Q2YmE0\n\nSe vuoi iniziare subito, scrivimi cosa hai già fatto. Se invece vuoi conoscere risultati, rischi, differenze tra bot e sala segnali o capire come funziona tutto, chiedimi pure liberamente 😊"
+
+async def get_welcome_message():
+    """Read the active /start copy from the CRM, with a local fallback."""
+    try:
+        headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(
+                f"{SUPABASE_URL}/rest/v1/crm_integrations",
+                headers=headers,
+                params={"provider": "eq.telegram", "select": "public_config", "limit": "1"},
+            )
+        if r.status_code < 300 and r.json():
+            configured = (r.json()[0].get("public_config") or {}).get("welcome_message")
+            if configured:
+                return configured
+        if r.status_code >= 300:
+            log.warning("Welcome message CRM read failed: %s %s", r.status_code, r.text[:200])
+    except Exception as exc:
+        log.warning("Welcome message CRM unavailable: %s", exc)
+    return DEFAULT_WELCOME_MESSAGE
+
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/health":
@@ -48,7 +70,8 @@ async def record_message(update: Update, direction="in"):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await record_message(update)
-    await update.message.reply_text("Ciao! Sono l'assistente XAU Machine. Ti spiego sala segnali, bot, registrazione e prossimi passaggi. Scrivi /help per iniziare.")
+    welcome_message = await get_welcome_message()
+    await update.message.reply_text(welcome_message, disable_web_page_preview=True)
     await record_message(update, "out")
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
