@@ -1,5 +1,6 @@
 import os
 import asyncio
+import json
 import logging
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -314,6 +315,33 @@ def _testo_risposta_openai(data: dict) -> str:
     return "\n".join(parti).strip()
 
 
+def _estrai_risposta_cliente(testo_ai: str) -> tuple[str, dict]:
+    """Se il prompt restituisce JSON, invia al cliente solo reply_text.
+
+    Intent, stage, escalation e follow-up restano disponibili come metadati
+    interni e non devono mai comparire nella chat Telegram.
+    """
+    raw = (testo_ai or "").strip()
+    candidato = raw
+    if candidato.startswith("```"):
+        righe = candidato.splitlines()
+        if righe and righe[0].strip().lower() in ("```", "```json"):
+            righe = righe[1:]
+        if righe and righe[-1].strip() == "```":
+            righe = righe[:-1]
+        candidato = "\n".join(righe).strip()
+    try:
+        dati = json.loads(candidato)
+    except (json.JSONDecodeError, TypeError):
+        return raw, {}
+    if not isinstance(dati, dict):
+        return raw, {}
+    reply = dati.get("reply_text") or dati.get("reply") or dati.get("message")
+    if not isinstance(reply, str) or not reply.strip():
+        return raw, dati
+    return reply.strip(), dati
+
+
 async def genera_risposta_ai(testo: str, contesto: dict) -> str:
     prompt_crm = (contesto.get("prompt") or "").strip()
     instructions = AI_RUNTIME_RULES
@@ -347,9 +375,16 @@ async def genera_risposta_ai(testo: str, contesto: dict) -> str:
         )
     if r.status_code >= 300:
         raise RuntimeError(f"CRM AI {r.status_code}: {r.text[:240]}")
-    risposta = (r.json().get("text") or "").strip()
-    if not risposta:
+    risposta_raw = (r.json().get("text") or "").strip()
+    if not risposta_raw:
         raise RuntimeError("OpenAI non ha restituito testo")
+    risposta, metadati = _estrai_risposta_cliente(risposta_raw)
+    if metadati:
+        log.info(
+            "AI intent=%s stage=%s escalate=%s followup=%s",
+            metadati.get("intent"), metadati.get("stage"),
+            metadati.get("should_escalate"), metadati.get("follow_up_type"),
+        )
     return risposta
 
 async def track_start(update: Update, deep_link_code: str):
