@@ -2,7 +2,6 @@ import os
 import logging
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from datetime import datetime, timezone
 import httpx
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
@@ -15,6 +14,7 @@ SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID", "")
 CRM_TRACKING_SECRET = os.environ.get("CRM_TRACKING_SECRET", "")
+CRM_TENANT_SLUG = os.environ.get("CRM_TENANT_SLUG", "xau-machine")
 CRM_HEADERS = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}", "Content-Type": "application/json", "Prefer": "return=minimal"}
 
 DEFAULT_WELCOME_MESSAGE = "Ciao 👋 Benvenuto in XAU Machine! 🚀\n\nSe hai già le idee chiare e vuoi unirti a noi, ecco il percorso rapido 👇\n\n🆕 DEVI ANCORA REGISTRARTI?\n\n🔗 Registrati su PU Prime da questo link:\nhttps://puvip.co/la-partners/Pvzi1lQC\n\n• Lascia vuoto “Codice di riferimento”\n• Completa la verifica del documento\n• Inviami Nome e Cognome per controllare il collegamento ✅\n\n⚠️ Non depositare ancora: aspetta la mia conferma e la guida per aprire il conto corretto:\n\n• Copy Popular Trading\n• Standard\n• Valuta EUR\n• Nessun voucher\n\n♻️ HAI GIÀ PU PRIME?\n\nScrivimi prima di procedere. Ti guiderò nel trasferimento utilizzando il codice IB:\n\n👉 23217421\n\n📊 SALA SEGNALI\n\nPuoi entrare gratuitamente per 7 giorni e copiare tutti i nostri segnali 👇\n\nhttps://t.me/+-e1_tDFps0Q2YmE0\n\nSe vuoi iniziare subito, scrivimi cosa hai già fatto. Se invece vuoi conoscere risultati, rischi, differenze tra bot e sala segnali o capire come funziona tutto, chiedimi pure liberamente 😊"
@@ -27,7 +27,10 @@ async def get_welcome_message(deep_link_code: str):
             r = await client.post(
                 f"{SUPABASE_URL}/rest/v1/rpc/crm_get_telegram_welcome",
                 headers=headers,
-                json={"p_deep_link_code": deep_link_code or "tg_direct"},
+                json={
+                    "p_tenant_slug": CRM_TENANT_SLUG,
+                    "p_deep_link_code": deep_link_code or "tg_direct",
+                },
             )
         if r.status_code < 300:
             configured = r.json()
@@ -56,18 +59,59 @@ def start_health_server():
     port = int(os.environ.get("PORT", "8080"))
     ThreadingHTTPServer(("0.0.0.0", port), HealthHandler).serve_forever()
 
-async def crm_insert(table, payload):
+async def crm_rpc(name, payload):
     async with httpx.AsyncClient(timeout=15) as client:
-        r = await client.post(f"{SUPABASE_URL}/rest/v1/{table}", headers=CRM_HEADERS, json=payload)
-        if r.status_code >= 300:
-            log.warning("CRM %s %s: %s", table, r.status_code, r.text[:300])
+        r = await client.post(
+            f"{SUPABASE_URL}/rest/v1/rpc/{name}",
+            headers=CRM_HEADERS,
+            json=payload,
+        )
+    if r.status_code >= 300:
+        log.warning("CRM RPC %s %s: %s", name, r.status_code, r.text[:300])
+        return None
+    try:
+        return r.json()
+    except Exception:
+        return None
 
-async def record_message(update: Update, direction="in"):
+async def record_message(
+    update: Update,
+    direction="inbound",
+    body=None,
+    sender_type=None,
+    external_message_id=None,
+):
     if not update.effective_user or not update.effective_chat:
         return
-    text = update.effective_message.text if update.effective_message else ""
-    chat_id = str(update.effective_chat.id)
-    await crm_insert("crm_messages", {"telegram_chat_id": chat_id, "direction": direction, "content": text or "", "created_at": datetime.now(timezone.utc).isoformat()})
+    message = update.effective_message
+    message_body = body if body is not None else (message.text if message else "")
+    if sender_type is None:
+        sender_type = "lead" if direction == "inbound" else "system"
+    if external_message_id is None and message:
+        external_message_id = f"telegram:{update.effective_chat.id}:{message.message_id}:{direction}"
+    await crm_rpc(
+        "crm_record_telegram_message",
+        {
+            "p_secret": CRM_TRACKING_SECRET,
+            "p_tenant_slug": CRM_TENANT_SLUG,
+            "p_telegram_chat_id": update.effective_chat.id,
+            "p_direction": direction,
+            "p_sender_type": sender_type,
+            "p_body": message_body or "",
+            "p_external_message_id": external_message_id,
+        },
+    )
+
+async def send_and_record(update: Update, text: str, sender_type="system", **kwargs):
+    sent = await update.message.reply_text(text, **kwargs)
+    await record_message(
+        update,
+        "outbound",
+        body=text,
+        sender_type=sender_type,
+        external_message_id=f"telegram:{sent.chat_id}:{sent.message_id}:outbound",
+    )
+    return sent
 
 async def track_start(update: Update, deep_link_code: str):
     if not CRM_TRACKING_SECRET or not update.effective_user or not update.effective_chat:
@@ -80,6 +124,7 @@ async def track_start(update: Update, deep_link_code: str):
         "p_full_name": user.full_name or "",
         "p_username": user.username or "",
         "p_deep_link_code": deep_link_code or "tg_direct",
+        "p_tenant_slug": CRM_TENANT_SLUG,
     }
     try:
         async with httpx.AsyncClient(timeout=10) as client:
@@ -98,16 +143,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await track_start(update, deep_link_code)
     await record_message(update)
     welcome_message = await get_welcome_message(deep_link_code)
-    await update.message.reply_text(welcome_message, disable_web_page_preview=True)
-    await record_message(update, "out")
+    await send_and_record(
+        update,
+        welcome_message,
+        sender_type="system",
+        disable_web_page_preview=True,
+    )
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("/registrazione - link e procedura\n/sala_segnali - informazioni sala\n/verifica_ib - verifica iscrizione\n/deposito - stato deposito\n/guida_bot - guida accesso\n/screenshot - richiedi aggiornamento MT5\n/intervento_umano - parla con un operatore")
 
 async def simple_reply(update, text):
     await record_message(update)
-    await update.message.reply_text(text)
-    await record_message(update, "out")
+    await send_and_record(update, text)
 
 async def registration(update, context): await simple_reply(update, "Per registrarti usa il link PU Prime indicato dal tuo referente. Dopo l'iscrizione scrivi qui e verifichiamo l'IB.")
 async def signals(update, context): await simple_reply(update, "La sala segnali pubblica operazioni e risultati. Posso spiegarti differenze, rischi e modalità di accesso.")
@@ -117,9 +165,18 @@ async def guide(update, context): await simple_reply(update, "Quando l'iscrizion
 async def screenshot(update, context): await simple_reply(update, "Richiesta screenshot MT5 registrata. Il worker VPS invierà l'ultimo risultato disponibile nel CRM.")
 async def human(update, context):
     await record_message(update)
-    chat_id = str(update.effective_chat.id)
-    await crm_insert("crm_human_handoffs", {"reason": "Richiesta operatore dal bot v2", "priority": "high", "status": "open", "channels": ["telegram","email","whatsapp","ringover"], "metadata": {"telegram_chat_id": chat_id}})
-    await update.message.reply_text("Ho registrato la richiesta e avvisato l'operatore.")
+    chat_id = update.effective_chat.id
+    await crm_rpc(
+        "crm_request_human_handoff",
+        {
+            "p_secret": CRM_TRACKING_SECRET,
+            "p_tenant_slug": CRM_TENANT_SLUG,
+            "p_telegram_chat_id": chat_id,
+            "p_reason": "Richiesta operatore dal bot v2",
+            "p_priority": "high",
+        },
+    )
+    await send_and_record(update, "Ho registrato la richiesta e avvisato l'operatore.")
     if ADMIN_CHAT_ID:
         try:
             await context.bot.send_message(chat_id=int(ADMIN_CHAT_ID), text=f"Nuova richiesta operatore dal chat {chat_id}")
@@ -127,8 +184,10 @@ async def human(update, context):
 
 async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await record_message(update)
-    await update.message.reply_text("Ho ricevuto il messaggio. Posso aiutarti con registrazione, sala segnali, verifica IB, deposito o passaggio a un operatore. Scrivi /help.")
-    await record_message(update, "out")
+    await send_and_record(
+        update,
+        "Ho ricevuto il messaggio. Posso aiutarti con registrazione, sala segnali, verifica IB, deposito o passaggio a un operatore. Scrivi /help.",
+    )
 
 async def post_init(app):
     me = await app.bot.get_me()
