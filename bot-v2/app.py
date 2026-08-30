@@ -23,13 +23,13 @@ async def get_welcome_message():
     try:
         headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
         async with httpx.AsyncClient(timeout=10) as client:
-            r = await client.get(
-                f"{SUPABASE_URL}/rest/v1/crm_integrations",
+            r = await client.post(
+                f"{SUPABASE_URL}/rest/v1/rpc/crm_get_telegram_welcome",
                 headers=headers,
-                params={"provider": "eq.telegram", "select": "public_config", "limit": "1"},
+                json={},
             )
-        if r.status_code < 300 and r.json():
-            configured = (r.json()[0].get("public_config") or {}).get("welcome_message")
+        if r.status_code < 300:
+            configured = r.json()
             if configured:
                 return configured
         if r.status_code >= 300:
