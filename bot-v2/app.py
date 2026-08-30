@@ -14,6 +14,7 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID", "")
+CRM_TRACKING_SECRET = os.environ.get("CRM_TRACKING_SECRET", "")
 CRM_HEADERS = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}", "Content-Type": "application/json", "Prefer": "return=minimal"}
 
 DEFAULT_WELCOME_MESSAGE = "Ciao 👋 Benvenuto in XAU Machine! 🚀\n\nSe hai già le idee chiare e vuoi unirti a noi, ecco il percorso rapido 👇\n\n🆕 DEVI ANCORA REGISTRARTI?\n\n🔗 Registrati su PU Prime da questo link:\nhttps://puvip.co/la-partners/Pvzi1lQC\n\n• Lascia vuoto “Codice di riferimento”\n• Completa la verifica del documento\n• Inviami Nome e Cognome per controllare il collegamento ✅\n\n⚠️ Non depositare ancora: aspetta la mia conferma e la guida per aprire il conto corretto:\n\n• Copy Popular Trading\n• Standard\n• Valuta EUR\n• Nessun voucher\n\n♻️ HAI GIÀ PU PRIME?\n\nScrivimi prima di procedere. Ti guiderò nel trasferimento utilizzando il codice IB:\n\n👉 23217421\n\n📊 SALA SEGNALI\n\nPuoi entrare gratuitamente per 7 giorni e copiare tutti i nostri segnali 👇\n\nhttps://t.me/+-e1_tDFps0Q2YmE0\n\nSe vuoi iniziare subito, scrivimi cosa hai già fatto. Se invece vuoi conoscere risultati, rischi, differenze tra bot e sala segnali o capire come funziona tutto, chiedimi pure liberamente 😊"
@@ -68,7 +69,33 @@ async def record_message(update: Update, direction="in"):
     chat_id = str(update.effective_chat.id)
     await crm_insert("crm_messages", {"telegram_chat_id": chat_id, "direction": direction, "content": text or "", "created_at": datetime.now(timezone.utc).isoformat()})
 
+async def track_start(update: Update, deep_link_code: str):
+    if not CRM_TRACKING_SECRET or not update.effective_user or not update.effective_chat:
+        return
+    user = update.effective_user
+    payload = {
+        "p_secret": CRM_TRACKING_SECRET,
+        "p_telegram_user_id": user.id,
+        "p_telegram_chat_id": update.effective_chat.id,
+        "p_full_name": user.full_name or "",
+        "p_username": user.username or "",
+        "p_deep_link_code": deep_link_code or "tg_direct",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.post(
+                f"{SUPABASE_URL}/rest/v1/rpc/crm_track_telegram_start",
+                headers=CRM_HEADERS,
+                json=payload,
+            )
+        if r.status_code >= 300:
+            log.warning("Campaign tracking failed: %s %s", r.status_code, r.text[:200])
+    except Exception as exc:
+        log.warning("Campaign tracking unavailable: %s", exc)
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    deep_link_code = context.args[0] if context.args else "tg_direct"
+    await track_start(update, deep_link_code)
     await record_message(update)
     welcome_message = await get_welcome_message()
     await update.message.reply_text(welcome_message, disable_web_page_preview=True)
@@ -103,9 +130,13 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Ho ricevuto il messaggio. Posso aiutarti con registrazione, sala segnali, verifica IB, deposito o passaggio a un operatore. Scrivi /help.")
     await record_message(update, "out")
 
+async def post_init(app):
+    me = await app.bot.get_me()
+    log.info("Telegram bot connected: @%s (id=%s)", me.username, me.id)
+
 def main():
     threading.Thread(target=start_health_server, daemon=True, name="healthcheck").start()
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     for cmd, fn in {"start":start,"help":help_cmd,"registrazione":registration,"sala_segnali":signals,"verifica_ib":verify_ib,"deposito":deposit,"guida_bot":guide,"screenshot":screenshot,"intervento_umano":human}.items():
         app.add_handler(CommandHandler(cmd, fn))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message))
