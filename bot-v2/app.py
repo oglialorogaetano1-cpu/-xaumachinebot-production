@@ -10,6 +10,9 @@ from telegram.ext import Application, CommandHandler, MessageHandler, ContextTyp
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("xau-bot-v2")
+# Evita che httpx registri URL Telegram completi contenenti il token del bot.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
