@@ -17,8 +17,6 @@ SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID", "")
 CRM_TRACKING_SECRET = os.environ.get("CRM_TRACKING_SECRET", "")
 CRM_TENANT_SLUG = os.environ.get("CRM_TENANT_SLUG", "xau-machine")
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
-OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5.6-luna").strip()
 CRM_HEADERS = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}", "Content-Type": "application/json", "Prefer": "return=minimal"}
 
 AI_RUNTIME_RULES = """Sei l'assistente commerciale ufficiale di XAU Machine su Telegram.
@@ -314,8 +312,6 @@ def _testo_risposta_openai(data: dict) -> str:
 
 
 async def genera_risposta_ai(testo: str, contesto: dict) -> str:
-    if not OPENAI_API_KEY:
-        raise RuntimeError("OPENAI_API_KEY non configurata su Railway")
     prompt_crm = (contesto.get("prompt") or "").strip()
     instructions = AI_RUNTIME_RULES
     if prompt_crm:
@@ -329,21 +325,26 @@ async def genera_risposta_ai(testo: str, contesto: dict) -> str:
             input_items.append({"role": role, "content": content[:8000]})
     if not input_items or input_items[-1].get("role") != "user":
         input_items.append({"role": "user", "content": testo[:8000]})
-    async with httpx.AsyncClient(timeout=45) as client:
+    # La chiave OpenAI rimane in Supabase Vault. Railway invia soltanto il
+    # testo necessario alla Edge Function protetta e riceve la risposta.
+    async with httpx.AsyncClient(timeout=55) as client:
         r = await client.post(
-            "https://api.openai.com/v1/responses",
-            headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
+            f"{SUPABASE_URL}/functions/v1/crm-ai-chat",
+            headers={
+                "apikey": SUPABASE_KEY,
+                "Authorization": f"Bearer {SUPABASE_KEY}",
+                "Content-Type": "application/json",
+            },
             json={
-                "model": OPENAI_MODEL,
+                "runtime_secret": CRM_TRACKING_SECRET,
+                "tenant_slug": CRM_TENANT_SLUG,
                 "instructions": instructions,
                 "input": input_items,
-                "reasoning": {"effort": "low"},
-                "max_output_tokens": 700,
             },
         )
     if r.status_code >= 300:
-        raise RuntimeError(f"OpenAI {r.status_code}: {r.text[:240]}")
-    risposta = _testo_risposta_openai(r.json())
+        raise RuntimeError(f"CRM AI {r.status_code}: {r.text[:240]}")
+    risposta = (r.json().get("text") or "").strip()
     if not risposta:
         raise RuntimeError("OpenAI non ha restituito testo")
     return risposta
