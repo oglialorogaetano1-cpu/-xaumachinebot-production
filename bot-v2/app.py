@@ -130,19 +130,20 @@ async def attendi_e_invia_screenshot(context: ContextTypes.DEFAULT_TYPE, chat_id
         riga = righe[0]
         stato = riga.get("stato")
         if stato == "fatto" and riga.get("immagine_url"):
-            # Un'immagine con tutti i valori a zero indica normalmente che il
-            # terminale MT5 della VPS non e' autenticato sul conto corretto.
-            # Non va mai presentata al cliente come "conto reale".
+            # Il conto deve essere realmente autenticato: profitto e numero di
+            # operazioni possono essere zero in una giornata senza trade, ma
+            # login, balance ed equity non possono mancare o essere a zero.
             try:
                 metriche_valide = (
-                    abs(float(riga.get("profitto") or 0)) > 0.000001
-                    or abs(float(riga.get("percentuale") or 0)) > 0.000001
-                    or int(riga.get("operazioni") or 0) > 0
+                    int(riga.get("account_login") or 0) > 0
+                    and float(riga.get("balance") or 0) > 0
+                    and float(riga.get("equity") or 0) > 0
+                    and bool((riga.get("account_server") or "").strip())
                 )
             except (TypeError, ValueError):
                 metriche_valide = False
             if not metriche_valide:
-                log.error("Snapshot MT5 %s rifiutato: dati tutti a zero", riga_id)
+                log.error("Snapshot MT5 %s rifiutato: conto non autenticato o saldo non valido", riga_id)
                 await context.bot.send_message(
                     chat_id=chat_id,
                     text=("Il terminale MT5 non sta restituendo dati validi del conto. "
@@ -153,7 +154,7 @@ async def attendi_e_invia_screenshot(context: ContextTypes.DEFAULT_TYPE, chat_id
                     try:
                         await context.bot.send_message(
                             chat_id=int(ADMIN_CHAT_ID),
-                            text=f"⚠️ Snapshot MT5 {riga_id}: terminale/conto non valido (tutti i dati a zero).",
+                            text=f"⚠️ Snapshot MT5 {riga_id}: terminale non autenticato sul conto reale o saldo non valido.",
                         )
                     except Exception:
                         pass
