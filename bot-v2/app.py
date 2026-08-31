@@ -79,35 +79,6 @@ def testo_credenziali_investor_mt5() -> str | None:
         MT5_INVESTOR_PLATFORM, MT5_INVESTOR_BROKER, MT5_INVESTOR_SERVER,
         MT5_INVESTOR_LOGIN, MT5_INVESTOR_PASSWORD,
     )
-
-
-async def puo_ricevere_credenziali_investor(update: Update) -> bool:
-    """Consente l'invio solo all'admin o a un lead verificato nel CRM."""
-    chat = update.effective_chat
-    user = update.effective_user
-    if chat is None or user is None:
-        return False
-    admin_id = str(ADMIN_CHAT_ID or "").strip()
-    if admin_id and (str(chat.id) == admin_id or str(user.id) == admin_id):
-        return True
-    try:
-        headers = dict(CRM_HEADERS)
-        headers.pop("Prefer", None)
-        async with httpx.AsyncClient(timeout=12) as client:
-            r = await client.post(
-                f"{SUPABASE_URL}/rest/v1/rpc/crm_can_share_mt5_investor",
-                headers=headers,
-                json={
-                    "p_secret": CRM_TRACKING_SECRET,
-                    "p_tenant_slug": CRM_TENANT_SLUG,
-                    "p_telegram_user_id": user.id,
-                    "p_telegram_chat_id": chat.id,
-                },
-            )
-        return r.status_code < 300 and r.json() is True
-    except Exception as exc:
-        log.warning("Verifica accesso Investor non disponibile: %s", exc)
-        return False
     if not all(v.strip() for v in valori):
         return None
     return (
@@ -596,8 +567,7 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chiede_credenziali_investor_mt5(testo):
         risposta_credenziali = testo_credenziali_investor_mt5()
         await record_message(update, "in", testo, "lead")
-        autorizzato = await puo_ricevere_credenziali_investor(update)
-        if risposta_credenziali and autorizzato:
+        if risposta_credenziali:
             await msg.reply_text(risposta_credenziali)
             # Non salvare la password nella cronologia CRM/prompt AI.
             await record_message(
@@ -605,14 +575,6 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Credenziali Investor MT5 in sola lettura inviate al cliente (password omessa dal CRM).",
                 "ai",
             )
-        elif not autorizzato:
-            risposta_errore = (
-                "Le credenziali Investor sono disponibili, ma posso inviarle solo "
-                "dopo la verifica del profilo nel CRM. Ho registrato la richiesta "
-                "per l'approvazione dell'operatore."
-            )
-            await msg.reply_text(risposta_errore)
-            await record_message(update, "out", risposta_errore, "ai")
         else:
             risposta_errore = (
                 "L'accesso Investor MT5 non e' configurato correttamente. "
