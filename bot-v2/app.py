@@ -2,6 +2,7 @@ import os
 import asyncio
 import json
 import logging
+import re
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from datetime import datetime, timezone
@@ -54,6 +55,33 @@ _PAROLE_PERIODO = (
     ("oggi", "oggi"), ("giornata", "oggi"), ("giornaliero", "oggi"),
 )
 
+PERIODO_DA_CHIEDERE = "__chiedi_periodo__"
+
+
+def estrai_periodo_mt5(testo: str) -> str | None:
+    """Normalizza il periodo espresso dal cliente, anche in una risposta breve.
+
+    I quattro valori storici restano compatibili con il worker esistente; per
+    intervalli arbitrari viene usato ``months:N``, che il worker VPS deve
+    interpretare come intervallo mobile di N mesi fino a oggi.
+    """
+    t = re.sub(r"\s+", " ", (testo or "").strip().lower())
+    if not t:
+        return None
+    mesi = re.search(r"\b(?:ultim[oi]\s+)?(\d{1,2})\s+mesi?\b", t)
+    if mesi:
+        numero = max(1, min(int(mesi.group(1)), 24))
+        return "6mesi" if numero == 6 else f"months:{numero}"
+    if any(p in t for p in ("ultimi sei mesi", "ultimi 6 mesi", "sei mesi", "6 mesi")):
+        return "6mesi"
+    if any(p in t for p in ("ultimo mese", "questo mese", "del mese", "mensile")) or t in {"mese", "un mese"}:
+        return "mese"
+    if any(p in t for p in ("ultima settimana", "questa settimana", "settimanale")) or t in {"settimana", "una settimana"}:
+        return "settimana"
+    if any(p in t for p in ("oggi", "giornata", "giornaliero")):
+        return "oggi"
+    return None
+
 
 def rileva_richiesta_screenshot(testo: str) -> str | None:
     """Ritorna il periodo richiesto ('oggi'/'settimana'/'mese'/'6mesi') se il
@@ -63,12 +91,21 @@ def rileva_richiesta_screenshot(testo: str) -> str | None:
     t = (testo or "").strip().lower()
     if not t:
         return None
-    if not any(p in t for p in _PAROLE_SCREENSHOT):
-        return None
-    for chiave, periodo in _PAROLE_PERIODO:
-        if chiave in t:
-            return periodo
-    return "oggi"
+    periodo = estrai_periodo_mt5(t)
+    richiesta_esplicita = any(p in t for p in _PAROLE_SCREENSHOT)
+    # Una risposta breve come "ultimo mese?" o "4 mesi" deve continuare il
+    # flusso MT5 e non finire nella normale conversazione AI.
+    risposta_solo_periodo = bool(re.fullmatch(
+        r"(?:invece\s+)?(?:(?:dei|degli|dell[oa])\s+)?(?:ultim[oi]\s+|quest[oa]\s+)?"
+        r"(?:\d{1,2}|un[ao]?|sei)?\s*(?:mes[ei]|settimana|oggi)[?!. ]*",
+        t,
+    ))
+    if periodo and (richiesta_esplicita or risposta_solo_periodo):
+        return periodo
+    if richiesta_esplicita:
+        # Se il cliente non ha indicato il periodo, non assumere "oggi".
+        return PERIODO_DA_CHIEDERE
+    return None
 
 
 async def crea_richiesta_screenshot(table_row: dict) -> dict | None:
@@ -196,13 +233,15 @@ async def attendi_e_invia_screenshot(context: ContextTypes.DEFAULT_TYPE, chat_id
 
 
 async def richiedi_screenshot_mt5(update: Update, context: ContextTypes.DEFAULT_TYPE,
-                                   periodo: str, testo_originale: str = "") -> None:
+                                   periodo: str, testo_originale: str = "",
+                                   registra_messaggio: bool = True) -> None:
     msg = update.effective_message
     chat = update.effective_chat
     if msg is None or chat is None:
         return
     user = update.effective_user
-    await record_message(update, "in", testo_originale, "lead")
+    if registra_messaggio:
+        await record_message(update, "in", testo_originale, "lead")
     riga = await crea_richiesta_screenshot({
         "telegram_chat_id": chat.id,
         "telegram_user_id": user.id if user else None,
@@ -213,7 +252,14 @@ async def richiedi_screenshot_mt5(update: Update, context: ContextTypes.DEFAULT_
     if not riga or not riga.get("id"):
         await msg.reply_text("Non sono riuscito a registrare la richiesta, riprova tra poco o scrivi /intervento_umano.")
         return
-    attesa = "Un attimo, controllo il conto reale… 📊"
+    etichette = {
+        "oggi": "di oggi", "settimana": "dell'ultima settimana",
+        "mese": "dell'ultimo mese", "6mesi": "degli ultimi 6 mesi",
+    }
+    descrizione = etichette.get(periodo)
+    if not descrizione and periodo.startswith("months:"):
+        descrizione = f"degli ultimi {periodo.split(':', 1)[1]} mesi"
+    attesa = f"Un attimo, controllo il conto reale {descrizione or ''}… 📊".replace("  ", " ")
     await msg.reply_text(attesa)
     await record_message(update, "out", attesa, "ai")
     asyncio.create_task(attendi_e_invia_screenshot(context, chat.id, riga["id"]))
@@ -342,7 +388,7 @@ def _estrai_risposta_cliente(testo_ai: str) -> tuple[str, dict]:
     return reply.strip(), dati
 
 
-async def genera_risposta_ai(testo: str, contesto: dict) -> str:
+async def genera_risposta_ai(testo: str, contesto: dict) -> tuple[str, dict]:
     prompt_crm = (contesto.get("prompt") or "").strip()
     instructions = AI_RUNTIME_RULES
     if prompt_crm:
@@ -385,7 +431,7 @@ async def genera_risposta_ai(testo: str, contesto: dict) -> str:
             metadati.get("intent"), metadati.get("stage"),
             metadati.get("should_escalate"), metadati.get("follow_up_type"),
         )
-    return risposta
+    return risposta, metadati
 
 async def track_start(update: Update, deep_link_code: str):
     if not CRM_TRACKING_SECRET or not update.effective_user or not update.effective_chat:
@@ -466,18 +512,43 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if msg is None or not update.effective_chat:
         return
     testo = msg.text or ""
+    if context.user_data.pop("awaiting_mt5_period", False):
+        periodo_risposta = estrai_periodo_mt5(testo)
+        if periodo_risposta:
+            await richiedi_screenshot_mt5(update, context, periodo_risposta, testo)
+            return
     periodo = rileva_richiesta_screenshot(testo)
+    if periodo == PERIODO_DA_CHIEDERE:
+        context.user_data["awaiting_mt5_period"] = True
+        domanda = "Certo 📊 Ti va bene l'andamento di oggi oppure vuoi un altro periodo, per esempio una settimana, un mese o 4 mesi?"
+        await record_message(update, "in", testo, "lead")
+        await msg.reply_text(domanda)
+        await record_message(update, "out", domanda, "ai")
+        return
     if periodo:
         await richiedi_screenshot_mt5(update, context, periodo, testo)
         return
     contesto = await record_message(update, "in", testo, "lead")
     try:
-        risposta = await genera_risposta_ai(testo, contesto)
+        risposta, metadati = await genera_risposta_ai(testo, contesto)
     except Exception as exc:
         log.error("Risposta AI non disponibile: %s", exc)
         risposta = ("In questo momento l'assistente automatico non riesce a rispondere. "
                     "Ho segnalato il problema: puoi riprovare tra poco oppure chiedermi "
                     "di parlare con un operatore.")
+        metadati = {}
+    next_action = str(metadati.get("next_action") or "")
+    if next_action.startswith("request_mt5_snapshot:"):
+        periodo_ai = estrai_periodo_mt5(next_action.split(":", 1)[1])
+        if not periodo_ai:
+            valore = next_action.split(":", 1)[1].strip()
+            if valore in {"oggi", "settimana", "mese", "6mesi"} or re.fullmatch(r"months:\d{1,2}", valore):
+                periodo_ai = valore
+        if periodo_ai:
+            await richiedi_screenshot_mt5(
+                update, context, periodo_ai, testo, registra_messaggio=False,
+            )
+            return
     await msg.reply_text(risposta, disable_web_page_preview=True)
     await record_message(update, "out", risposta, "ai")
 
