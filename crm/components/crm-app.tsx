@@ -203,14 +203,14 @@ function Conversations({leads,tenant,demo,locale}:{leads:Lead[];tenant:Tenant|nu
     setError("");
     const [conversationsResult,messagesResult]=await Promise.all([
       client.from("crm_conversations").select("id,lead_id,channel,status,last_message_at").eq("tenant_id",tenant.id).order("last_message_at",{ascending:false}),
-      client.from("crm_messages").select("id,conversation_id,direction,sender_type,body,created_at").eq("tenant_id",tenant.id).order("created_at",{ascending:true}).limit(2000),
+      client.from("crm_messages").select("id,conversation_id,direction,sender_type,body,created_at").eq("tenant_id",tenant.id).order("created_at",{ascending:false}).limit(2000),
     ]);
     if(conversationsResult.error||messagesResult.error){
       const message=conversationsResult.error?.message||messagesResult.error?.message||"Errore sconosciuto";
       setError(`${en?"Unable to load conversations":"Impossibile caricare le conversazioni"}: ${message}`);
     }else{
       setConversationRows((conversationsResult.data||[]) as ConversationRow[]);
-      setMessageRows((messagesResult.data||[]) as MessageRow[]);
+      setMessageRows([...(messagesResult.data||[])].reverse() as MessageRow[]);
     }
     setLoading(false);
   },[demo,tenant,en]);
