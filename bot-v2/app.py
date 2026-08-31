@@ -66,10 +66,19 @@ PERIODO_DA_CHIEDERE = "__chiedi_periodo__"
 def chiede_credenziali_investor_mt5(testo: str) -> bool:
     """Riconosce richieste esplicite dell'accesso Investor in sola lettura."""
     t = re.sub(r"\s+", " ", (testo or "").strip().lower())
+    # In chat il cliente spesso scrive semplicemente "dammi le credenziali"
+    # e specifica "MT5" nel messaggio successivo. Una richiesta esplicita di
+    # credenziali deve quindi essere sufficiente da sola, senza passare all'AI.
+    richieste_esplicite = (
+        "credenzial", "password investor", "login investor",
+        "accesso investor", "dati investor",
+    )
+    if any(x in t for x in richieste_esplicite):
+        return True
     riferimenti_mt5 = ("mt5", "metatrader", "meta trader", "conto reale", "investor")
     richieste_accesso = (
         "credenzial", "login", "password", "accesso", "entrare", "entro",
-        "collegarmi", "collegare", "connettere",
+        "collegarmi", "collegare", "connettere", "dati", "coordinate",
     )
     return any(x in t for x in riferimenti_mt5) and any(x in t for x in richieste_accesso)
 
@@ -631,6 +640,10 @@ async def on_error(update, context: ContextTypes.DEFAULT_TYPE):
 async def post_init(app):
     me = await app.bot.get_me()
     log.info("Telegram bot connected: @%s (id=%s)", me.username, me.id)
+    log.info(
+        "MT5 Investor access configured: %s",
+        bool(testo_credenziali_investor_mt5()),
+    )
 
 def main():
     threading.Thread(target=start_health_server, daemon=True, name="healthcheck").start()
