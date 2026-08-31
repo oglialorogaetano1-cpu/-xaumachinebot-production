@@ -239,6 +239,23 @@ async def richiedi_screenshot_mt5(update: Update, context: ContextTypes.DEFAULT_
     chat = update.effective_chat
     if msg is None or chat is None:
         return
+    # Il worker VPS attuale gestisce questi quattro preset. Non inoltrare
+    # ``months:N`` finche' il worker non lo supporta: altrimenti la sua
+    # compatibilita' storica lo trasformerebbe silenziosamente in "oggi" e
+    # invierebbe al cliente un report con periodo sbagliato.
+    if periodo not in {"oggi", "settimana", "mese", "6mesi"}:
+        numero = periodo.split(":", 1)[1] if periodo.startswith("months:") else "richiesto"
+        risposta = (
+            f"Per ora posso generare il report reale di oggi, dell'ultima settimana, "
+            f"dell'ultimo mese o degli ultimi 6 mesi. Il report personalizzato di "
+            f"{numero} mesi non e' ancora attivo: non ti invio un periodo diverso "
+            f"spacciandolo per quello richiesto."
+        )
+        if registra_messaggio:
+            await record_message(update, "in", testo_originale, "lead")
+        await msg.reply_text(risposta)
+        await record_message(update, "out", risposta, "ai")
+        return
     user = update.effective_user
     if registra_messaggio:
         await record_message(update, "in", testo_originale, "lead")
