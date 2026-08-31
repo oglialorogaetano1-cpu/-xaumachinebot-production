@@ -22,6 +22,11 @@ SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID", "")
 CRM_TRACKING_SECRET = os.environ.get("CRM_TRACKING_SECRET", "")
 CRM_TENANT_SLUG = os.environ.get("CRM_TENANT_SLUG", "xau-machine")
+MT5_INVESTOR_PLATFORM = os.environ.get("MT5_INVESTOR_PLATFORM", "")
+MT5_INVESTOR_BROKER = os.environ.get("MT5_INVESTOR_BROKER", "")
+MT5_INVESTOR_SERVER = os.environ.get("MT5_INVESTOR_SERVER", "")
+MT5_INVESTOR_LOGIN = os.environ.get("MT5_INVESTOR_LOGIN", "")
+MT5_INVESTOR_PASSWORD = os.environ.get("MT5_INVESTOR_PASSWORD", "")
 CRM_HEADERS = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}", "Content-Type": "application/json", "Prefer": "return=minimal"}
 
 AI_RUNTIME_RULES = """Sei l'assistente commerciale ufficiale di XAU Machine su Telegram.
@@ -56,6 +61,36 @@ _PAROLE_PERIODO = (
 )
 
 PERIODO_DA_CHIEDERE = "__chiedi_periodo__"
+
+
+def chiede_credenziali_investor_mt5(testo: str) -> bool:
+    """Riconosce richieste esplicite dell'accesso Investor in sola lettura."""
+    t = re.sub(r"\s+", " ", (testo or "").strip().lower())
+    riferimenti_mt5 = ("mt5", "metatrader", "meta trader", "conto reale", "investor")
+    richieste_accesso = (
+        "credenzial", "login", "password", "accesso", "entrare", "entro",
+        "collegarmi", "collegare", "connettere",
+    )
+    return any(x in t for x in riferimenti_mt5) and any(x in t for x in richieste_accesso)
+
+
+def testo_credenziali_investor_mt5() -> str | None:
+    valori = (
+        MT5_INVESTOR_PLATFORM, MT5_INVESTOR_BROKER, MT5_INVESTOR_SERVER,
+        MT5_INVESTOR_LOGIN, MT5_INVESTOR_PASSWORD,
+    )
+    if not all(v.strip() for v in valori):
+        return None
+    return (
+        "📊 ACCESSO INVESTOR — SOLA LETTURA\n\n"
+        f"Piattaforma: {MT5_INVESTOR_PLATFORM}\n"
+        f"Broker: {MT5_INVESTOR_BROKER}\n"
+        f"Server: {MT5_INVESTOR_SERVER}\n"
+        f"Login: {MT5_INVESTOR_LOGIN}\n"
+        f"Password: {MT5_INVESTOR_PASSWORD}\n\n"
+        "Queste sono credenziali Investor: permettono di visualizzare il conto "
+        "e lo storico, ma non consentono di aprire, modificare o chiudere operazioni."
+    )
 
 
 def estrai_periodo_mt5(testo: str) -> str | None:
@@ -529,6 +564,25 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if msg is None or not update.effective_chat:
         return
     testo = msg.text or ""
+    if chiede_credenziali_investor_mt5(testo):
+        risposta_credenziali = testo_credenziali_investor_mt5()
+        await record_message(update, "in", testo, "lead")
+        if risposta_credenziali:
+            await msg.reply_text(risposta_credenziali)
+            # Non salvare la password nella cronologia CRM/prompt AI.
+            await record_message(
+                update, "out",
+                "Credenziali Investor MT5 in sola lettura inviate al cliente (password omessa dal CRM).",
+                "ai",
+            )
+        else:
+            risposta_errore = (
+                "L'accesso Investor MT5 non e' configurato correttamente. "
+                "Ho avvisato l'operatore senza inventare credenziali."
+            )
+            await msg.reply_text(risposta_errore)
+            await record_message(update, "out", risposta_errore, "ai")
+        return
     if context.user_data.pop("awaiting_mt5_period", False):
         periodo_risposta = estrai_periodo_mt5(testo)
         if periodo_risposta:
