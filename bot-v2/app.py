@@ -3,8 +3,6 @@ import asyncio
 import json
 import logging
 import re
-import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from datetime import datetime, timezone
 import httpx
 from telegram import Update
@@ -354,23 +352,6 @@ async def get_welcome_message(deep_link_code: str):
     except Exception as exc:
         log.warning("Welcome message CRM unavailable: %s", exc)
     return DEFAULT_WELCOME_MESSAGE
-
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path == "/health":
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain")
-            self.end_headers()
-            self.wfile.write(b"ok")
-        else:
-            self.send_response(404)
-            self.end_headers()
-    def log_message(self, fmt, *args):
-        return
-
-def start_health_server():
-    port = int(os.environ.get("PORT", "8080"))
-    ThreadingHTTPServer(("0.0.0.0", port), HealthHandler).serve_forever()
 
 async def crm_insert(table, payload):
     async with httpx.AsyncClient(timeout=15) as client:
@@ -752,9 +733,13 @@ async def post_init(app):
     )
 
 def main():
-    threading.Thread(target=start_health_server, daemon=True, name="healthcheck").start()
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     app.add_error_handler(on_error)
     for cmd, fn in {"start":start,"help":help_cmd,"registrazione":registration,"sala_segnali":signals,"verifica_ib":verify_ib,"deposito":deposit,"guida_bot":guide,"screenshot":screenshot,"intervento_umano":human}.items():
         app.add_handler(CommandHandler(cmd, fn))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, text_message))
+    log.info("XAU Machine Bot v2 online")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+if __name__ == "__main__":
+    main()
