@@ -28,6 +28,10 @@ MT5_INVESTOR_SERVER = os.environ.get("MT5_INVESTOR_SERVER", "")
 MT5_INVESTOR_LOGIN = os.environ.get("MT5_INVESTOR_LOGIN", "")
 MT5_INVESTOR_PASSWORD = os.environ.get("MT5_INVESTOR_PASSWORD", "")
 SIGNAL_ROOM_URL = "https://t.me/+-e1_tDFps0Q2YmE0"
+
+def is_admin_chat(chat_id: int | None) -> bool:
+    """Reports and internal funnel data are private admin-only data."""
+    return bool(chat_id is not None and ADMIN_CHAT_ID and str(chat_id) == str(ADMIN_CHAT_ID).strip())
 CRM_HEADERS = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}", "Content-Type": "application/json", "Prefer": "return=minimal"}
 
 AI_RUNTIME_RULES = """Sei l'assistente commerciale ufficiale di XAU Machine su Telegram.
@@ -656,6 +660,15 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     testo = msg.text or ""
     testo_lower = testo.lower()
     if any(x in testo_lower for x in ("risultati", "risultato", "quanti tp", "quante tp", "quanti stop", "tp avete preso", "performance", "resoconto")):
+        # I report della sala e il funnel sono dati interni: non devono mai
+        # essere restituiti a un cliente, anche se usa parole come
+        # "risultati" nella chat privata. Solo l'ADMIN_CHAT_ID può riceverli.
+        if not is_admin_chat(update.effective_chat.id):
+            risposta_privata = "I report e i dati interni della sala sono riservati all'operatore. Per informazioni sulla sala segnali usa il link ufficiale."
+            await record_message(update, "in", testo, "lead")
+            await msg.reply_text(risposta_privata, disable_web_page_preview=True)
+            await record_message(update, "out", risposta_privata, "ai")
+            return
         risposta = await sala_segnali_risultati(_rileva_periodo_sala(testo), _rileva_simbolo_sala(testo))
         await record_message(update, "in", testo, "lead")
         await msg.reply_text(risposta)
@@ -745,8 +758,3 @@ def main():
     for cmd, fn in {"start":start,"help":help_cmd,"registrazione":registration,"sala_segnali":signals,"verifica_ib":verify_ib,"deposito":deposit,"guida_bot":guide,"screenshot":screenshot,"intervento_umano":human}.items():
         app.add_handler(CommandHandler(cmd, fn))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, text_message))
-    log.info("XAU Machine Bot v2 online")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
-
-if __name__ == "__main__":
-    main()
