@@ -386,7 +386,13 @@ async def poll_operator_outbox(app) -> None:
             rows = r.json() if r.status_code < 300 else []
             for row in rows or []:
                 try:
-                    await app.bot.send_message(chat_id=row["telegram_chat_id"], text=row["body"])
+                    media_url = (row.get("media_url") or "").strip()
+                    media_type = (row.get("media_type") or "").lower()
+                    if media_url and media_type.startswith("video"):
+                        await app.bot.send_video(chat_id=row["telegram_chat_id"], video=media_url,
+                                                 caption=row.get("body") or None)
+                    else:
+                        await app.bot.send_message(chat_id=row["telegram_chat_id"], text=row["body"])
                     log.info("Messaggio operatore inviato su Telegram: %s", row.get("id"))
                 except Exception as exc:
                     log.warning("Invio messaggio operatore %s fallito: %s", row.get("id"), exc)
