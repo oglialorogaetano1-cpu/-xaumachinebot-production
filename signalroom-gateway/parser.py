@@ -143,6 +143,12 @@ def parse_signal_message(text: str) -> ParsedSignal:
                 nums = re.split(r"\s*[/,]\s*", list_m.group(1))
                 targets = [_to_float(n) for n in nums if n]
 
+        # Gli annunci "BUY SIGNAL COMING ON ..." contengono solo
+        # simbolo/direzione: sono notifiche, non nuove operazioni.
+        # Ignorarli nella tabella strutturata evita righe parziali duplicate.
+        if entry_m is None and sl_m is None and not targets:
+            return ParsedSignal(tipo="non_riconosciuto", symbol=symbol, direction=direction)
+
         return ParsedSignal(
             tipo="apertura",
             symbol=symbol,
