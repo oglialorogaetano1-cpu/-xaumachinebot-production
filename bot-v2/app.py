@@ -370,6 +370,41 @@ async def crm_insert(table, payload):
             log.warning("CRM %s %s: %s", table, r.status_code, r.text[:300])
 
 
+
+# --- Controllo IA per chat + coda operatore CRM ---
+async def crm_ai_attiva(chat_id: int) -> bool:
+    try:
+        headers = dict(CRM_HEADERS); headers.pop("Prefer", None)
+        async with httpx.AsyncClient(timeout=8) as client:
+            r = await client.post(f"{SUPABASE_URL}/rest/v1/rpc/crm_get_ai_status", headers=headers,
+                json={"p_secret": CRM_TRACKING_SECRET, "p_tenant_slug": CRM_TENANT_SLUG,
+                      "p_telegram_chat_id": chat_id})
+        if r.status_code < 300:
+            return bool(r.json())
+    except Exception as exc:
+        log.warning("Controllo stato IA non riuscito, IA resta attiva: %s", exc)
+    return True
+
+async def poll_operator_outbox(app) -> None:
+    headers = dict(CRM_HEADERS); headers.pop("Prefer", None)
+    await asyncio.sleep(3)
+    while True:
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                r = await client.post(f"{SUPABASE_URL}/rest/v1/rpc/crm_pull_pending_outbox", headers=headers,
+                    json={"p_secret": CRM_TRACKING_SECRET, "p_tenant_slug": CRM_TENANT_SLUG, "p_limit": 10})
+            rows = r.json() if r.status_code < 300 else []
+            for row in rows or []:
+                try:
+                    await app.bot.send_message(chat_id=row["telegram_chat_id"], text=row["body"])
+                    log.info("Messaggio operatore inviato su Telegram: %s", row.get("id"))
+                except Exception as exc:
+                    log.warning("Invio messaggio operatore %s fallito: %s", row.get("id"), exc)
+        except Exception as exc:
+            log.warning("Polling coda operatore fallito: %s", exc)
+        await asyncio.sleep(5)
+
+
 async def record_message(update: Update, direction="in", body: str | None = None,
                          sender_type: str | None = None) -> dict:
     """Registra il messaggio nel CRM e restituisce prompt + memoria recente.
@@ -609,6 +644,8 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await richiedi_screenshot_mt5(update, context, periodo, testo)
         return
     contesto = await record_message(update, "in", testo, "lead")
+    if not await crm_ai_attiva(update.effective_chat.id):
+        return
     try:
         risposta, metadati = await genera_risposta_ai(testo, contesto)
     except Exception as exc:
@@ -651,7 +688,7 @@ def main():
     app.add_error_handler(on_error)
     for cmd, fn in {"start":start,"help":help_cmd,"registrazione":registration,"sala_segnali":signals,"verifica_ib":verify_ib,"deposito":deposit,"guida_bot":guide,"screenshot":screenshot,"intervento_umano":human}.items():
         app.add_handler(CommandHandler(cmd, fn))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, text_message))
     log.info("XAU Machine Bot v2 online")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
