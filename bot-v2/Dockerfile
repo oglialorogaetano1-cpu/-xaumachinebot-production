@@ -6,3 +6,4 @@ COPY app.py .
 COPY health_server.py .
 EXPOSE 8080
 CMD ["sh", "-c", "python -u health_server.py & exec python -u app.py"]
+# health server keeps Railway healthcheck independent from Telegram polling
