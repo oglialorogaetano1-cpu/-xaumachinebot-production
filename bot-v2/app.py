@@ -391,6 +391,9 @@ async def poll_operator_outbox(app) -> None:
                     if media_url and media_type.startswith("video"):
                         await app.bot.send_video(chat_id=row["telegram_chat_id"], video=media_url,
                                                  caption=row.get("body") or None)
+                    elif media_url and media_type.startswith("image"):
+                        await app.bot.send_photo(chat_id=row["telegram_chat_id"], photo=media_url,
+                                                 caption=row.get("body") or None)
                     else:
                         await app.bot.send_message(chat_id=row["telegram_chat_id"], text=row["body"])
                     log.info("Messaggio operatore inviato su Telegram: %s", row.get("id"))
