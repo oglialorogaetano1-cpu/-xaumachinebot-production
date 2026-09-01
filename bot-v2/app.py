@@ -27,6 +27,7 @@ MT5_INVESTOR_BROKER = os.environ.get("MT5_INVESTOR_BROKER", "")
 MT5_INVESTOR_SERVER = os.environ.get("MT5_INVESTOR_SERVER", "")
 MT5_INVESTOR_LOGIN = os.environ.get("MT5_INVESTOR_LOGIN", "")
 MT5_INVESTOR_PASSWORD = os.environ.get("MT5_INVESTOR_PASSWORD", "")
+SIGNAL_ROOM_URL = "https://t.me/+-e1_tDFps0Q2YmE0"
 CRM_HEADERS = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}", "Content-Type": "application/json", "Prefer": "return=minimal"}
 
 AI_RUNTIME_RULES = """Sei l'assistente commerciale ufficiale di XAU Machine su Telegram.
@@ -35,7 +36,11 @@ Non chiedere al cliente di usare comandi: i comandi sono riservati all'amministr
 Segui il prompt commerciale del CRM e usa lo storico della conversazione.
 Non inventare verifiche IB, depositi, risultati, saldi o rendimenti. Non promettere guadagni
 e spiega con chiarezza che il trading comporta il rischio di perdita. Se non hai un dato
-reale o non sai rispondere, proponi il passaggio a un operatore umano."""
+reale o non sai rispondere, proponi il passaggio a un operatore umano.
+Se chiedono una verifica PU Prime e non esiste una verifica reale nei dati, rispondi:
+"Al momento non ti trovo dentro iscritto con noi su PU Prime, sei sicuro? Hai scritto bene nome e cognome?"
+Non dire "verifico" se non hai un dato reale. Quando chiedono la sala segnali, fornisci sempre il link ufficiale.
+Non inventare operazioni, TP1, TP2 o risultati: riportali solo se arrivano da una fonte reale sincronizzata."""
 
 DEFAULT_WELCOME_MESSAGE = "Ciao 👋 Benvenuto in XAU Machine! 🚀\n\nSe hai già le idee chiare e vuoi unirti a noi, ecco il percorso rapido 👇\n\n🆕 DEVI ANCORA REGISTRARTI?\n\n🔗 Registrati su PU Prime da questo link:\nhttps://puvip.co/la-partners/Pvzi1lQC\n\n• Lascia vuoto “Codice di riferimento”\n• Completa la verifica del documento\n• Inviami Nome e Cognome per controllare il collegamento ✅\n\n⚠️ Non depositare ancora: aspetta la mia conferma e la guida per aprire il conto corretto:\n\n• Copy Popular Trading\n• Standard\n• Valuta EUR\n• Nessun voucher\n\n♻️ HAI GIÀ PU PRIME?\n\nScrivimi prima di procedere. Ti guiderò nel trasferimento utilizzando il codice IB:\n\n👉 23217421\n\n📊 SALA SEGNALI\n\nPuoi entrare gratuitamente per 7 giorni e copiare tutti i nostri segnali 👇\n\nhttps://t.me/+-e1_tDFps0Q2YmE0\n\nSe vuoi iniziare subito, scrivimi cosa hai già fatto. Se invece vuoi conoscere risultati, rischi, differenze tra bot e sala segnali o capire come funziona tutto, chiedimi pure liberamente 😊"
 
@@ -579,8 +584,8 @@ async def simple_reply(update, text):
     await record_message(update, "out", text, "ai")
 
 async def registration(update, context): await simple_reply(update, "Per registrarti usa il link PU Prime indicato dal tuo referente. Dopo l'iscrizione scrivi qui e verifichiamo l'IB.")
-async def signals(update, context): await simple_reply(update, "La sala segnali pubblica operazioni e risultati. Posso spiegarti differenze, rischi e modalità di accesso.")
-async def verify_ib(update, context): await simple_reply(update, "La verifica IB può richiedere tempo. Quando disponibile, invia uno screenshot dell'area conto e controlliamo il collegamento.")
+async def signals(update, context): await simple_reply(update, f"📊 Sala segnali XAU Machine\n\nAccedi da qui:\n{SIGNAL_ROOM_URL}\n\nPuoi entrare gratuitamente per 7 giorni e seguire le operazioni pubblicate. Il trading comporta rischi e i risultati passati non garantiscono risultati futuri.")
+async def verify_ib(update, context): await simple_reply(update, "Al momento non ti trovo dentro iscritto con noi su PU Prime, sei sicuro? Hai scritto bene nome e cognome? Se vuoi, riscrivimeli qui e controllo.")
 async def deposit(update, context): await simple_reply(update, "Per assistenza sul deposito non inviare password o codici. Posso passare la richiesta a un operatore.")
 async def guide(update, context): await simple_reply(update, "Quando l'iscrizione sotto l'IB è verificata, riceverai la guida di accesso al bot e alla sala.")
 
@@ -608,6 +613,9 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if msg is None or not update.effective_chat:
         return
     testo = msg.text or ""
+    if any(x in testo.lower() for x in ("sala segnali", "sala signal", "signal room")):
+        await simple_reply(update, f"📊 Sala segnali XAU Machine\n\nAccedi da qui:\n{SIGNAL_ROOM_URL}\n\nPuoi entrare gratuitamente per 7 giorni e seguire le operazioni pubblicate. Il trading comporta rischi e i risultati passati non garantiscono risultati futuri.")
+        return
     if chiede_credenziali_investor_mt5(testo):
         risposta_credenziali = testo_credenziali_investor_mt5()
         await record_message(update, "in", testo, "lead")
