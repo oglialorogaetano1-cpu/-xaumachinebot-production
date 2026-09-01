@@ -277,6 +277,10 @@ async def _enforce_webhook(app: web.Application) -> None:
 def crea_app() -> web.Application:
     app = web.Application()
     app.router.add_post("/webhook", handle_webhook)
+    # Compatibilità con il vecchio webhook già registrato su Telegram.
+    # Il nuovo endpoint canonico resta /webhook, ma /telegram evita di
+    # perdere gli aggiornamenti durante la migrazione.
+    app.router.add_post("/telegram", handle_webhook)
     app.router.add_get("/health", handle_health)
     app.on_startup.append(_enforce_webhook)
     return app
