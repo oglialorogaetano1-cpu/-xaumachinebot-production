@@ -754,6 +754,8 @@ def _start_health_server():
 
 
 def main():
+    import threading
+    threading.Thread(target=_start_health_server, daemon=True).start()
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     app.add_error_handler(on_error)
     for cmd, fn in {"start":start,"help":help_cmd,"registrazione":registration,"sala_segnali":signals,"verifica_ib":verify_ib,"deposito":deposit,"guida_bot":guide,"screenshot":screenshot,"intervento_umano":human}.items():
