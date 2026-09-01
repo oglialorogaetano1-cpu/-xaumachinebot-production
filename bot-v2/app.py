@@ -410,6 +410,47 @@ async def poll_operator_outbox(app) -> None:
         await asyncio.sleep(5)
 
 
+# --- Sala segnali: risultati reali da Supabase (mai inventati) ---
+_SIGNAL_SYMBOL_ALIASES = {"GOLD":"XAUUSD","ORO":"XAUUSD","XAU":"XAUUSD","XAUUSD":"XAUUSD","SILVER":"XAGUSD","ARGENTO":"XAGUSD","XAG":"XAGUSD","XAGUSD":"XAGUSD"}
+_PERIODO_LABEL = {"day":"di oggi","week":"di questa settimana","month":"di questo mese"}
+
+def _rileva_periodo_sala(testo: str) -> str:
+    t = testo.lower()
+    if "settiman" in t or "week" in t: return "week"
+    if "mese" in t or "mensil" in t or "month" in t: return "month"
+    return "day"
+
+def _rileva_simbolo_sala(testo: str) -> str | None:
+    t = testo.upper()
+    for alias, simbolo in _SIGNAL_SYMBOL_ALIASES.items():
+        if alias in t: return simbolo
+    return None
+
+async def sala_segnali_risultati(periodo: str = "day", simbolo: str | None = None) -> str:
+    if not CRM_TRACKING_SECRET:
+        return "I dati reali della sala segnali non sono ancora disponibili."
+    try:
+        headers = dict(CRM_HEADERS); headers.pop("Prefer", None)
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.post(f"{SUPABASE_URL}/rest/v1/rpc/crm_get_signal_period_stats", headers=headers,
+                json={"p_secret": CRM_TRACKING_SECRET, "p_tenant_slug": CRM_TENANT_SLUG, "p_period": periodo, "p_symbol": simbolo})
+        if r.status_code >= 300: return "I dati della sala segnali non sono ancora disponibili al momento."
+        s = r.json() or {}
+    except Exception as exc:
+        log.warning("Lettura risultati sala fallita: %s", exc)
+        return "I dati della sala segnali non sono ancora disponibili al momento."
+    totale = s.get("totale_segnali") or 0
+    filtro = f" su {simbolo}" if simbolo else ""
+    label = _PERIODO_LABEL.get(periodo, "del periodo richiesto")
+    if not totale: return f"Non risultano ancora segnali registrati{filtro} {label}: dati non disponibili."
+    righe = [f"📊 Risultati sala segnali{filtro} {label}:", f"Segnali totali: {totale}"]
+    for key, label_key in (("tp1","TP1 raggiunti"),("tp2","TP2 raggiunti"),("tp3","TP3 raggiunti"),("tp_oltre","Oltre TP3"),("sl","Stop Loss"),("aperti","Ancora aperti"),("chiusi_manuale","Chiusi manualmente")):
+        if s.get(key): righe.append(f"{label_key}: {s[key]}")
+    righe.append("Il trading comporta rischi: dati storici, non promessa di risultati futuri.")
+    righe.append(f"Sala segnali: {SIGNAL_ROOM_URL}")
+    return "\n".join(righe)
+
+
 async def record_message(update: Update, direction="in", body: str | None = None,
                          sender_type: str | None = None) -> dict:
     """Registra il messaggio nel CRM e restituisce prompt + memoria recente.
@@ -613,6 +654,13 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if msg is None or not update.effective_chat:
         return
     testo = msg.text or ""
+    testo_lower = testo.lower()
+    if any(x in testo_lower for x in ("risultati", "risultato", "quanti tp", "quante tp", "quanti stop", "tp avete preso", "performance", "resoconto")):
+        risposta = await sala_segnali_risultati(_rileva_periodo_sala(testo), _rileva_simbolo_sala(testo))
+        await record_message(update, "in", testo, "lead")
+        await msg.reply_text(risposta)
+        await record_message(update, "out", risposta, "ai")
+        return
     if any(x in testo.lower() for x in ("sala segnali", "sala signal", "signal room")):
         await simple_reply(update, f"📊 Sala segnali XAU Machine\n\nAccedi da qui:\n{SIGNAL_ROOM_URL}\n\nPuoi entrare gratuitamente per 7 giorni e seguire le operazioni pubblicate. Il trading comporta rischi e i risultati passati non garantiscono risultati futuri.")
         return
