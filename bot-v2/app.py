@@ -57,6 +57,7 @@ _PAROLE_SCREENSHOT = (
     "andamento", "risultato di oggi",
     "risultati di oggi", "risultato della settimana", "risultato del mese",
     "quanto ha fatto", "quanto sta facendo", "saldo del conto",
+    "quando ha fatto", "di oggi", "ieri",
     "aggiornamento del conto", "stato del conto",
     "mandami", "fammi vedere", "mostrami",
 )
@@ -151,6 +152,11 @@ def rileva_richiesta_screenshot(testo: str) -> str | None:
         r"(?:\d{1,2}|un[ao]?|sei)?\s*(?:mes[ei]|settimana|oggi)[?!. ]*",
         t,
     ))
+    # "ieri" non è ancora un preset supportato dal worker: manteniamo però
+    # il messaggio nel flusso MT5, così una risposta successiva come "di oggi"
+    # non viene passata all'AI commerciale per errore.
+    if "ieri" in t and richiesta_esplicita:
+        return PERIODO_DA_CHIEDERE
     if periodo and (richiesta_esplicita or risposta_solo_periodo):
         return periodo
     if richiesta_esplicita:
