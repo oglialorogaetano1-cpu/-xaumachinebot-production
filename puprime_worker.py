@@ -379,11 +379,44 @@ async def scrape_once():
             await page.goto(
                 LOGIN_URL, wait_until="domcontentloaded", timeout=30000
             )
-            await page.locator('input[type="email"]').first.fill(
-                PU_EMAIL, timeout=10000
+            async def fill_first_visible(selectors, value, label):
+                for selector in selectors:
+                    locator = page.locator(selector)
+                    for index in range(await locator.count()):
+                        candidate = locator.nth(index)
+                        try:
+                            if await candidate.is_visible():
+                                await candidate.fill(value, timeout=10000)
+                                return
+                        except Exception:
+                            continue
+                raise RuntimeError(
+                    f"PU login field not found: {label}; url={page.url}"
+                )
+
+            # PU Prime ha cambiato più volte il markup del login (email/text,
+            # name e autocomplete). Prova selettori semantici e fallback visibili.
+            await fill_first_visible(
+                (
+                    'input[type="email"]',
+                    'input[autocomplete="username"]',
+                    'input[name*="email" i]',
+                    'input[name*="user" i]',
+                    'input[placeholder*="mail" i]',
+                    'input[type="text"]',
+                ),
+                PU_EMAIL,
+                "email/username",
             )
-            await page.locator('input[type="password"]').first.fill(
-                PU_PASSWORD, timeout=10000
+            await fill_first_visible(
+                (
+                    'input[type="password"]',
+                    'input[autocomplete="current-password"]',
+                    'input[name*="pass" i]',
+                    'input[placeholder*="pass" i]',
+                ),
+                PU_PASSWORD,
+                "password",
             )
             clicked = await click_visible_text(
                 page, ("Accedi", "Login", "Log in", "Sign in")
