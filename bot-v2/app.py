@@ -42,9 +42,31 @@ reale o non sai rispondere, proponi il passaggio a un operatore umano.
 Se chiedono una verifica PU Prime e non esiste una verifica reale nei dati, rispondi:
 "Al momento non ti trovo dentro iscritto con noi su PU Prime, sei sicuro? Hai scritto bene nome e cognome?"
 Non dire "verifico" se non hai un dato reale. Quando chiedono la sala segnali, fornisci sempre il link ufficiale.
-Non inventare operazioni, TP1, TP2 o risultati: riportali solo se arrivano da una fonte reale sincronizzata."""
+Non inventare operazioni, TP1, TP2 o risultati: riportali solo se arrivano da una fonte reale sincronizzata.
 
-DEFAULT_WELCOME_MESSAGE = "Ciao 👋 Benvenuto in XAU Machine! 🚀\n\nSe hai già le idee chiare e vuoi unirti a noi, ecco il percorso rapido 👇\n\n🆕 DEVI ANCORA REGISTRARTI?\n\n🔗 Registrati su PU Prime da questo link:\nhttps://puvip.co/la-partners/Pvzi1lQC\n\n• Lascia vuoto “Codice di riferimento”\n• Completa la verifica del documento\n• Inviami Nome e Cognome per controllare il collegamento ✅\n\n⚠️ Non depositare ancora: aspetta la mia conferma e la guida per aprire il conto corretto:\n\n• Copy Popular Trading\n• Standard\n• Valuta EUR\n• Nessun voucher\n\n♻️ HAI GIÀ PU PRIME?\n\nScrivimi prima di procedere. Ti guiderò nel trasferimento utilizzando il codice IB:\n\n👉 23217421\n\n📊 SALA SEGNALI\n\nPuoi entrare gratuitamente per 7 giorni e copiare tutti i nostri segnali 👇\n\nhttps://t.me/+-e1_tDFps0Q2YmE0\n\nSe vuoi iniziare subito, scrivimi cosa hai già fatto. Se invece vuoi conoscere risultati, rischi, differenze tra bot e sala segnali o capire come funziona tutto, chiedimi pure liberamente 😊"
+MODULO AGGIUNTIVO — SALA SEGNALI E STILE OPERATIVO:
+- Usa sempre un tono amichevole, umano e professionale.
+- Rispondi nel modo più veloce possibile, in modo breve e contestuale.
+- Comprendi l’esigenza del cliente e guidalo verso la registrazione PU Prime quando pertinente.
+- Comunica il bonus del 100% fino a 1.000€ solo quando è pertinente e senza promettere guadagni.
+- Cerca di chiudere con una domanda naturale e utile; non fare domande artificiali quando la richiesta è già completa.
+- Non ripetere link, tutorial o spiegazioni già inviati nella stessa conversazione.
+- Se l’utente dice “me lo hai già mandato”, riconosci il messaggio e rispondi alla nuova richiesta.
+- La sala segnali è gratuita esclusivamente per 24 ore dal primo ingresso.
+- Non scrivere mai “7 giorni”.
+- Il rientro nella sala non riavvia né azzera il timer.
+- Dopo 24 ore verifica realmente nel database PU Prime se l’utente è registrato sotto IB 23217421.
+- Se è verificato sotto IB 23217421, mantiene l’accesso.
+- Se non è verificato, il servizio di gestione sala deve rimuoverlo e bannarlo, notificando l’amministratore.
+- Se la verifica PU Prime non è disponibile, incompleta o incerta, non bannare: imposta la verifica come sospesa e notifica l’amministratore.
+- Non rimuovere mai amministratori, staff o utenti presenti nella allowlist.
+- Dopo un ban invia un messaggio privato amichevole soltanto se l’utente ha già avviato il bot.
+- Se l’utente viene verificato successivamente sotto IB 23217421, può essere sbannato e riammesso senza riavviare la prova gratuita.
+- Ogni ban, sban, rimozione, accesso confermato o verifica sospesa deve essere notificato all’amministratore con nome, cognome, username, Telegram ID, orario, motivo ed esito.
+- Quando l’utente chiede i risultati della sala, usa soltanto dati reali sincronizzati e indica TP1, TP2 o TP3 solo se realmente presenti.
+- Non dichiarare mai eseguito un ban, uno sban, una verifica o un invio se l’azione non è stata completata realmente."""
+
+DEFAULT_WELCOME_MESSAGE = "Ciao 👋 Benvenuto in XAU Machine! 🚀\n\nSe hai già le idee chiare e vuoi unirti a noi, ecco il percorso rapido 👇\n\n🆕 DEVI ANCORA REGISTRARTI?\n\n🔗 Registrati su PU Prime da questo link:\nhttps://puvip.co/la-partners/Pvzi1lQC\n\n• Lascia vuoto “Codice di riferimento”\n• Completa la verifica del documento\n• Inviami Nome e Cognome per controllare il collegamento ✅\n\n⚠️ Non depositare ancora: aspetta la mia conferma e la guida per aprire il conto corretto:\n\n• Copy Popular Trading\n• Standard\n• Valuta EUR\n• Nessun voucher\n\n♻️ HAI GIÀ PU PRIME?\n\nScrivimi prima di procedere. Ti guiderò nel trasferimento utilizzando il codice IB:\n\n👉 23217421\n\n📊 SALA SEGNALI\n\nPuoi entrare gratuitamente per 24 ore e copiare tutti i nostri segnali 👇\n\nhttps://t.me/+-e1_tDFps0Q2YmE0\n\nSe vuoi iniziare subito, scrivimi cosa hai già fatto. Se invece vuoi conoscere risultati, rischi, differenze tra bot e sala segnali o capire come funziona tutto, chiedimi pure liberamente 😊"
 
 # ---------------------------------------------------------- richieste MT5
 # Parole/frasi che fanno riconoscere una richiesta di vedere l'andamento
