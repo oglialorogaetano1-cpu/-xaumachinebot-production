@@ -101,6 +101,12 @@ def parse_signal_message(text: str) -> ParsedSignal:
     if not text or not text.strip():
         return ParsedSignal(tipo="non_riconosciuto")
 
+    # Un riepilogo contiene molte coppie BUY/SELL + simbolo + prezzo, ma non
+    # apre una nuova operazione. Deve restare disponibile solo come messaggio
+    # grezzo per i report.
+    if re.search(r"\bdaily\s+recap\b|\briepilogo\s+giornaliero\b", text, re.IGNORECASE):
+        return ParsedSignal(tipo="non_riconosciuto")
+
     symbol_match = _SYMBOL_TOKEN.search(text)
     symbol = _normalize_symbol(symbol_match.group(1)) if symbol_match else None
 
