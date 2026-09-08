@@ -829,6 +829,29 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     contesto = await record_message(update, "in", testo, "lead")
     contesto["puprime"] = await crm_puprime_context(update, testo)
+    verifica_puprime = contesto["puprime"]
+    origine_match = verifica_puprime.get("matched_by")
+    if (verifica_puprime.get("status") == "matched"
+            and verifica_puprime.get("newly_linked")
+            and origine_match in {"candidate_name", "account_or_user_id", "telegram_profile_name"}):
+        nome_cliente = verifica_puprime.get("name") or ""
+        risposta_match = (
+            f"Perfetto{', ' + nome_cliente if nome_cliente else ''}: ora ti vedo correttamente "
+            "registrato e collegato a noi su PU Prime ✅\n\n"
+            "Non depositare ancora. Ti guido nel prossimo passaggio per controllare "
+            "conto, piattaforma e valuta corretti."
+        )
+        await msg.reply_text(risposta_match)
+        await record_message(update, "out", risposta_match, "ai")
+        return
+    if verifica_puprime.get("status") == "ambiguous" and origine_match == "candidate_name":
+        risposta_omonimia = (
+            "Trovo più clienti con questo nome. Scrivimi il numero conto oppure "
+            "l'ID utente PU Prime e controllo senza rischiare un collegamento sbagliato."
+        )
+        await msg.reply_text(risposta_omonimia)
+        await record_message(update, "out", risposta_omonimia, "ai")
+        return
     if not await crm_ai_attiva(update.effective_chat.id):
         return
     try:
