@@ -747,7 +747,7 @@ async def verify_ib(update, context):
     await msg.reply_text(risposta)
     await record_message(update, "out", risposta, "ai")
 async def deposit(update, context): await simple_reply(update, "Per assistenza sul deposito non inviare password o codici. Posso passare la richiesta a un operatore.")
-async def guide(update, context): await simple_reply(update, "Quando l'iscrizione sotto l'IB è verificata, riceverai la guida di accesso al bot e alla sala.")
+async def guide(update, context): await simple_reply(update, "📘 Guida configurazione PU Prime\n\n1. Vai su Conti.\n2. Seleziona Copy Popular Trading.\n3. Scegli Standard.\n4. Seleziona EUR oppure la tua valuta locale.\n5. Non inserire alcun voucher.\n6. Completa la creazione del conto.\n7. Mandami il numero del nuovo conto oppure uno screenshot.\n\n⚠️ Non effettuare ancora il deposito: prima controllo la configurazione.\n\n— Support XauMachineAi")
 
 async def screenshot(update, context):
     msg = update.effective_message
@@ -836,10 +836,19 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             and origine_match in {"candidate_name", "account_or_user_id", "telegram_profile_name"}):
         nome_cliente = verifica_puprime.get("name") or ""
         risposta_match = (
-            f"Perfetto{', ' + nome_cliente if nome_cliente else ''}: ora ti vedo correttamente "
-            "registrato e collegato a noi su PU Prime ✅\n\n"
-            "Non depositare ancora. Ti guido nel prossimo passaggio per controllare "
-            "conto, piattaforma e valuta corretti."
+            f"✅ Perfetto{', ' + nome_cliente if nome_cliente else ''}: la registrazione "
+            "PU Prime risulta confermata.\n\n"
+            "Ora apri l’app PU Prime e segui questi passaggi:\n\n"
+            "1. Vai su Conti.\n"
+            "2. Seleziona Copy Popular Trading.\n"
+            "3. Scegli il conto Standard.\n"
+            "4. Seleziona EUR oppure la tua valuta locale.\n"
+            "5. Non inserire alcun voucher.\n"
+            "6. Completa la creazione del conto.\n"
+            "7. Mandami qui il numero del nuovo conto oppure uno screenshot.\n\n"
+            "⚠️ Non effettuare ancora il deposito: prima controllo che conto, "
+            "piattaforma e valuta siano configurati correttamente.\n\n"
+            "— Support XauMachineAi"
         )
         await msg.reply_text(risposta_match)
         await record_message(update, "out", risposta_match, "ai")
