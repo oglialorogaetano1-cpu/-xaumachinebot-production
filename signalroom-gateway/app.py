@@ -164,8 +164,10 @@ async def _gestisci_messaggio(msg: dict, modificato: bool) -> None:
                         "p_level": livello, "p_price": prezzo,
                     })
 
-            elif parsed.tipo == "aggiornamento" and parsed.symbol:
-                # trova il segnale aperto più recente su questo simbolo per collegare l'update
+            elif parsed.tipo == "aggiornamento":
+                # Se TP/SL non ripete il simbolo, collega l'aggiornamento al
+                # segnale reale aperto più recente. Il canale pubblica sempre
+                # l'esito subito dopo il segnale a cui si riferisce.
                 # (RPC, non una select diretta: le tabelle sono leggibili solo da
                 # "authenticated"/CRM, il gateway usa la anon key + secret)
                 r3 = await _rpc(client, "crm_find_open_signal", {
@@ -176,7 +178,7 @@ async def _gestisci_messaggio(msg: dict, modificato: bool) -> None:
                 r3.raise_for_status()
                 trading_signal_id = r3.json()
                 if not trading_signal_id:
-                    log.info("Aggiornamento (%s) su %s senza un segnale aperto corrispondente: solo il messaggio grezzo resta salvato", parsed.update_kind, parsed.symbol)
+                    log.info("Aggiornamento (%s) senza un segnale aperto corrispondente: solo il messaggio grezzo resta salvato", parsed.update_kind)
                 else:
                     if parsed.update_kind == "tp_hit":
                         await _rpc(client, "crm_signal_hit_target", {
