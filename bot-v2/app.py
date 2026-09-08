@@ -540,6 +540,25 @@ async def record_message(update: Update, direction="in", body: str | None = None
         return {}
 
 
+def normalizza_candidato_puprime(candidate_text: str) -> str:
+    """Ripulisce le frasi con cui il cliente comunica nome e cognome.
+
+    Gestisce prefissi, suffissi e righe separate come:
+    "Fatto Maria Carroni" e "Maria Carroni\\nMi chiamo".
+    """
+    testo = (candidate_text or "").strip()
+    testo = re.sub(
+        r"(?i)\\b(?:fatto|fatta|completato|completata|mi sono registrato|"
+        r"mi sono registrata|registrato|registrata|mi chiamo|nome e cognome)\\b",
+        " ",
+        testo,
+    )
+    testo = re.sub(r"(?i)^\\s*(?:sono|nome)\\s*[:,-]?\\s*", "", testo)
+    testo = re.sub(r"[\\r\\n]+", " ", testo)
+    testo = re.sub(r"\\s+", " ", testo).strip(" :,-.")
+    return testo
+
+
 async def crm_puprime_context(update: Update, candidate_text: str = "") -> dict:
     """Abbina solo conto/ID esatto o un nome completo univoco."""
     if not CRM_TRACKING_SECRET or not update.effective_user or not update.effective_chat:
@@ -549,7 +568,7 @@ async def crm_puprime_context(update: Update, candidate_text: str = "") -> dict:
         "p_tenant_slug": CRM_TENANT_SLUG,
         "p_telegram_user_id": update.effective_user.id,
         "p_telegram_chat_id": update.effective_chat.id,
-        "p_candidate": (candidate_text or "")[:500],
+        "p_candidate": normalizza_candidato_puprime(candidate_text)[:500],
     }
     try:
         headers = dict(CRM_HEADERS)
