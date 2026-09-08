@@ -66,6 +66,11 @@ MODULO AGGIUNTIVO — SALA SEGNALI E STILE OPERATIVO:
 - Quando l’utente chiede i risultati della sala, usa soltanto dati reali sincronizzati e indica TP1, TP2 o TP3 solo se realmente presenti.
 - Non dichiarare mai eseguito un ban, uno sban, una verifica o un invio se l’azione non è stata completata realmente."""
 
+PU_PRIME_NOT_FOUND = (
+    "Al momento non ti trovo dentro iscritto con noi su PU Prime, sei sicuro? "
+    "Hai scritto bene nome e cognome?"
+)
+
 DEFAULT_WELCOME_MESSAGE = "Ciao 👋 Benvenuto in XAU Machine! 🚀\n\nSe hai già le idee chiare e vuoi unirti a noi, ecco il percorso rapido 👇\n\n🆕 DEVI ANCORA REGISTRARTI?\n\n🔗 Registrati su PU Prime da questo link:\nhttps://puvip.co/la-partners/Pvzi1lQC\n\n• Lascia vuoto “Codice di riferimento”\n• Completa la verifica del documento\n• Inviami Nome e Cognome per controllare il collegamento ✅\n\n⚠️ Non depositare ancora: aspetta la mia conferma e la guida per aprire il conto corretto:\n\n• Copy Popular Trading\n• Standard\n• Valuta EUR\n• Nessun voucher\n\n♻️ HAI GIÀ PU PRIME?\n\nScrivimi prima di procedere. Ti guiderò nel trasferimento utilizzando il codice IB:\n\n👉 23217421\n\n📊 SALA SEGNALI\n\nPuoi entrare gratuitamente per 24 ore e copiare tutti i nostri segnali 👇\n\nhttps://t.me/+-e1_tDFps0Q2YmE0\n\nSe vuoi iniziare subito, scrivimi cosa hai già fatto. Se invece vuoi conoscere risultati, rischi, differenze tra bot e sala segnali o capire come funziona tutto, chiedimi pure liberamente 😊"
 
 # ---------------------------------------------------------- richieste MT5
@@ -413,6 +418,8 @@ async def poll_operator_outbox(app) -> None:
                     json={"p_secret": CRM_TRACKING_SECRET, "p_tenant_slug": CRM_TENANT_SLUG, "p_limit": 10})
             rows = r.json() if r.status_code < 300 else []
             for row in rows or []:
+                success = False
+                error_text = None
                 try:
                     media_url = (row.get("media_url") or "").strip()
                     media_type = (row.get("media_type") or "").lower()
@@ -424,9 +431,28 @@ async def poll_operator_outbox(app) -> None:
                                                  caption=row.get("body") or None)
                     else:
                         await app.bot.send_message(chat_id=row["telegram_chat_id"], text=row["body"])
+                    success = True
                     log.info("Messaggio operatore inviato su Telegram: %s", row.get("id"))
                 except Exception as exc:
+                    error_text = str(exc)
                     log.warning("Invio messaggio operatore %s fallito: %s", row.get("id"), exc)
+                try:
+                    async with httpx.AsyncClient(timeout=10) as client:
+                        ack = await client.post(
+                            f"{SUPABASE_URL}/rest/v1/rpc/crm_ack_outbox",
+                            headers=headers,
+                            json={
+                                "p_secret": CRM_TRACKING_SECRET,
+                                "p_tenant_slug": CRM_TENANT_SLUG,
+                                "p_id": row["id"],
+                                "p_success": success,
+                                "p_error": error_text,
+                            },
+                        )
+                    if ack.status_code >= 300:
+                        log.warning("ACK coda %s fallito: %s", row.get("id"), ack.text[:200])
+                except Exception as exc:
+                    log.warning("ACK coda %s non disponibile: %s", row.get("id"), exc)
         except Exception as exc:
             log.warning("Polling coda operatore fallito: %s", exc)
         await asyncio.sleep(5)
@@ -514,6 +540,55 @@ async def record_message(update: Update, direction="in", body: str | None = None
         return {}
 
 
+async def crm_puprime_context(update: Update, candidate_text: str = "") -> dict:
+    """Abbina solo conto/ID esatto o un nome completo univoco."""
+    if not CRM_TRACKING_SECRET or not update.effective_user or not update.effective_chat:
+        return {"status": "unavailable"}
+    payload = {
+        "p_secret": CRM_TRACKING_SECRET,
+        "p_tenant_slug": CRM_TENANT_SLUG,
+        "p_telegram_user_id": update.effective_user.id,
+        "p_telegram_chat_id": update.effective_chat.id,
+        "p_candidate": (candidate_text or "")[:500],
+    }
+    try:
+        headers = dict(CRM_HEADERS)
+        headers.pop("Prefer", None)
+        async with httpx.AsyncClient(timeout=12) as client:
+            r = await client.post(
+                f"{SUPABASE_URL}/rest/v1/rpc/crm_puprime_lookup",
+                headers=headers,
+                json=payload,
+            )
+        if r.status_code >= 300:
+            log.warning("PU Prime lookup %s: %s", r.status_code, r.text[:300])
+            return {"status": "unavailable"}
+        data = r.json()
+        return data if isinstance(data, dict) else {"status": "unavailable"}
+    except Exception as exc:
+        log.warning("PU Prime lookup non disponibile: %s", exc)
+        return {"status": "unavailable"}
+
+
+def puprime_prompt_context(data: dict) -> str:
+    status = str(data.get("status") or "not_found")
+    if status == "matched":
+        return (
+            "PU PRIME (dato verificato dal CRM): cliente registrato e collegato al nostro IB; "
+            f"ID utente={data.get('id_utente') or 'n/d'}; "
+            f"conti={', '.join(map(str, data.get('accounts') or [])) or 'n/d'}; "
+            f"deposito_rilevato={'sì' if data.get('deposit_detected') else 'no'}; "
+            f"tipo_conto={data.get('account_type') or 'n/d'}; "
+            f"valuta={data.get('currency') or 'n/d'}. "
+            "Conferma la registrazione e prosegui con il prossimo passaggio commerciale."
+        )
+    if status == "ambiguous":
+        return "PU PRIME: omonimia. Chiedi numero conto oppure ID utente; non confermare ancora."
+    if status == "unavailable":
+        return "PU PRIME: verifica temporaneamente non disponibile; non inventare lo stato."
+    return "PU PRIME: cliente non trovato nei dati sincronizzati; non confermare la registrazione."
+
+
 def _testo_risposta_openai(data: dict) -> str:
     parti = []
     for item in data.get("output") or []:
@@ -555,6 +630,7 @@ def _estrai_risposta_cliente(testo_ai: str) -> tuple[str, dict]:
 async def genera_risposta_ai(testo: str, contesto: dict) -> tuple[str, dict]:
     prompt_crm = (contesto.get("prompt") or "").strip()
     instructions = AI_RUNTIME_RULES
+    instructions += "\n\n" + puprime_prompt_context(contesto.get("puprime") or {})
     if prompt_crm:
         instructions += "\n\nPROMPT COMMERCIALE ATTIVO DAL CRM:\n" + prompt_crm
     history = contesto.get("history") or []
@@ -648,7 +724,28 @@ async def simple_reply(update, text):
 
 async def registration(update, context): await simple_reply(update, "Per registrarti usa il link PU Prime indicato dal tuo referente. Dopo l'iscrizione scrivi qui e verifichiamo l'IB.")
 async def signals(update, context): await simple_reply(update, f"📊 Sala segnali XAU Machine\n\nAccedi da qui:\n{SIGNAL_ROOM_URL}\n\nPuoi entrare gratuitamente per 7 giorni e seguire le operazioni pubblicate. Il trading comporta rischi e i risultati passati non garantiscono risultati futuri.")
-async def verify_ib(update, context): await simple_reply(update, "Al momento non ti trovo dentro iscritto con noi su PU Prime, sei sicuro? Hai scritto bene nome e cognome? Se vuoi, riscrivimeli qui e controllo.")
+async def verify_ib(update, context):
+    msg = update.effective_message
+    if msg is None:
+        return
+    testo = msg.text or "/verifica_ib"
+    await record_message(update, "in", testo, "lead")
+    verifica = await crm_puprime_context(update, testo)
+    if verifica.get("status") == "matched":
+        risposta = (
+            "Perfetto, ora ti vedo correttamente registrato e collegato a noi su PU Prime ✅\n\n"
+            "Ti guido nel prossimo passaggio. Se devi ancora aprire il conto corretto, scegli "
+            "Copy Popular Trading, Standard, valuta EUR e nessun voucher. Prima di depositare "
+            "scrivimi qui, così controlliamo insieme."
+        )
+    elif verifica.get("status") == "ambiguous":
+        risposta = "Trovo più clienti con questo nome. Scrivimi il numero conto oppure l'ID utente PU Prime e controllo subito."
+    elif verifica.get("status") == "unavailable":
+        risposta = "La verifica PU Prime è temporaneamente non disponibile. Riprova tra poco oppure chiedimi un operatore."
+    else:
+        risposta = PU_PRIME_NOT_FOUND + " Se vuoi, riscrivimi nome e cognome completi oppure il numero conto."
+    await msg.reply_text(risposta)
+    await record_message(update, "out", risposta, "ai")
 async def deposit(update, context): await simple_reply(update, "Per assistenza sul deposito non inviare password o codici. Posso passare la richiesta a un operatore.")
 async def guide(update, context): await simple_reply(update, "Quando l'iscrizione sotto l'IB è verificata, riceverai la guida di accesso al bot e alla sala.")
 
@@ -731,6 +828,7 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await richiedi_screenshot_mt5(update, context, periodo, testo)
         return
     contesto = await record_message(update, "in", testo, "lead")
+    contesto["puprime"] = await crm_puprime_context(update, testo)
     if not await crm_ai_attiva(update.effective_chat.id):
         return
     try:
@@ -768,6 +866,7 @@ async def post_init(app):
         "MT5 Investor access configured: %s",
         bool(testo_credenziali_investor_mt5()),
     )
+    app.create_task(poll_operator_outbox(app), name="crm-operator-outbox")
 
 def _start_health_server():
     """Keep Railway healthchecks independent from Telegram polling."""
