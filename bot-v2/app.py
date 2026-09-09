@@ -1180,3 +1180,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# Railway deployment marker: Telegram forum bridge.
