@@ -3,7 +3,9 @@ import asyncio
 import json
 import logging
 import re
+import threading
 from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import httpx
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
@@ -29,6 +31,26 @@ MT5_INVESTOR_LOGIN = os.environ.get("MT5_INVESTOR_LOGIN", "")
 MT5_INVESTOR_PASSWORD = os.environ.get("MT5_INVESTOR_PASSWORD", "")
 GOOGLE_TRANSLATE_API_KEY = os.environ.get("GOOGLE_TRANSLATE_API_KEY", "").strip()
 SIGNAL_ROOM_URL = "https://t.me/+-e1_tDFps0Q2YmE0"
+
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/health":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"ok")
+            return
+        self.send_response(404)
+        self.end_headers()
+
+    def log_message(self, *_args):
+        return
+
+
+def start_health_server():
+    port = int(os.environ.get("PORT", "8080"))
+    ThreadingHTTPServer(("0.0.0.0", port), HealthHandler).serve_forever()
 
 def support_forum_chat_id() -> str:
     return ACTIVE_SUPPORT_FORUM_CHAT_ID.strip()
@@ -1271,6 +1293,7 @@ async def post_init(app):
     app.create_task(poll_operator_outbox(app), name="crm-operator-outbox")
 
 def main():
+    threading.Thread(target=start_health_server, daemon=True, name="health-server").start()
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     app.add_error_handler(on_error)
     for cmd, fn in {"start":start,"help":help_cmd,"registrazione":registration,"sala_segnali":signals,"verifica_ib":verify_ib,"deposito":deposit,"guida_bot":guide,"screenshot":screenshot,"intervento_umano":human,"attiva_supporto":activate_support_forum}.items():
