@@ -548,14 +548,14 @@ def normalizza_candidato_puprime(candidate_text: str) -> str:
     """
     testo = (candidate_text or "").strip()
     testo = re.sub(
-        r"(?i)\\b(?:fatto|fatta|completato|completata|mi sono registrato|"
-        r"mi sono registrata|registrato|registrata|mi chiamo|nome e cognome)\\b",
+        r"(?i)\b(?:fatto|fatta|completato|completata|mi sono registrato|"
+        r"mi sono registrata|registrato|registrata|mi chiamo|nome e cognome)\b",
         " ",
         testo,
     )
-    testo = re.sub(r"(?i)^\\s*(?:sono|nome)\\s*[:,-]?\\s*", "", testo)
-    testo = re.sub(r"[\\r\\n]+", " ", testo)
-    testo = re.sub(r"\\s+", " ", testo).strip(" :,-.")
+    testo = re.sub(r"(?i)^\s*(?:sono|nome)\s*[:,-]?\s*", "", testo)
+    testo = re.sub(r"[\r\n]+", " ", testo)
+    testo = re.sub(r"\s+", " ", testo).strip(" :,-.")
     return testo
 
 
