@@ -27,6 +27,7 @@ MT5_INVESTOR_BROKER = os.environ.get("MT5_INVESTOR_BROKER", "")
 MT5_INVESTOR_SERVER = os.environ.get("MT5_INVESTOR_SERVER", "")
 MT5_INVESTOR_LOGIN = os.environ.get("MT5_INVESTOR_LOGIN", "")
 MT5_INVESTOR_PASSWORD = os.environ.get("MT5_INVESTOR_PASSWORD", "")
+GOOGLE_TRANSLATE_API_KEY = os.environ.get("GOOGLE_TRANSLATE_API_KEY", "").strip()
 SIGNAL_ROOM_URL = "https://t.me/+-e1_tDFps0Q2YmE0"
 
 def support_forum_chat_id() -> str:
@@ -457,6 +458,83 @@ async def crm_topic_save(*, telegram_user_id: int, telegram_chat_id: int,
     forum_chat_id = support_forum_chat_id()
     if not forum_chat_id or not CRM_TRACKING_SECRET:
         return False
+
+
+async def crm_store_language(update: Update) -> None:
+    """Salva la lingua Telegram del cliente per le risposte manuali tradotte."""
+    user = update.effective_user
+    chat = update.effective_chat
+    if not user or not chat or chat.type != "private" or not user.language_code:
+        return
+    language = user.language_code.split("-", 1)[0].lower()
+    if not re.fullmatch(r"[a-z]{2,3}", language):
+        return
+    headers = dict(CRM_HEADERS)
+    headers.pop("Prefer", None)
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            r = await client.post(
+                f"{SUPABASE_URL}/rest/v1/rpc/crm_set_telegram_language",
+                headers=headers,
+                json={
+                    "p_secret": CRM_TRACKING_SECRET,
+                    "p_tenant_slug": CRM_TENANT_SLUG,
+                    "p_telegram_user_id": user.id,
+                    "p_language": language,
+                },
+            )
+        if r.status_code >= 300:
+            log.warning("Salvataggio lingua Telegram fallito %s: %s", r.status_code, r.text[:200])
+    except Exception as exc:
+        log.warning("Salvataggio lingua Telegram non disponibile: %s", exc)
+
+
+async def crm_set_ai_control(chat_id: int, mode: str) -> dict:
+    """Pausa per un'ora, stop permanente o riattivazione della IA per chat."""
+    headers = dict(CRM_HEADERS)
+    headers.pop("Prefer", None)
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            r = await client.post(
+                f"{SUPABASE_URL}/rest/v1/rpc/crm_set_ai_control",
+                headers=headers,
+                json={
+                    "p_secret": CRM_TRACKING_SECRET,
+                    "p_tenant_slug": CRM_TENANT_SLUG,
+                    "p_telegram_chat_id": str(chat_id),
+                    "p_mode": mode,
+                },
+            )
+        if r.status_code >= 300:
+            log.warning("Controllo IA fallito %s: %s", r.status_code, r.text[:200])
+            return {}
+        data = r.json()
+        return data if isinstance(data, dict) else {}
+    except Exception as exc:
+        log.warning("Controllo IA non disponibile: %s", exc)
+        return {}
+
+
+async def google_translate_from_italian(text: str, target_language: str) -> tuple[str, bool]:
+    """Traduce con Google Cloud Translation; non usa il modello conversazionale."""
+    target = (target_language or "it").split("-", 1)[0].lower()
+    if target in ("", "it") or not GOOGLE_TRANSLATE_API_KEY:
+        return text, target in ("", "it")
+    try:
+        async with httpx.AsyncClient(timeout=12) as client:
+            r = await client.post(
+                "https://translation.googleapis.com/language/translate/v2",
+                params={"key": GOOGLE_TRANSLATE_API_KEY},
+                json={"q": text, "source": "it", "target": target, "format": "text"},
+            )
+        if r.status_code >= 300:
+            log.warning("Google Translate fallito %s: %s", r.status_code, r.text[:200])
+            return text, False
+        translated = (((r.json().get("data") or {}).get("translations") or [{}])[0].get("translatedText") or "").strip()
+        return (translated or text), bool(translated)
+    except Exception as exc:
+        log.warning("Google Translate non disponibile: %s", exc)
+        return text, False
     headers = dict(CRM_HEADERS)
     headers.pop("Prefer", None)
     try:
@@ -493,7 +571,9 @@ async def ensure_customer_topic(update: Update) -> int | None:
     if existing.get("message_thread_id"):
         return int(existing["message_thread_id"])
 
-    raw_name = user.full_name or (f"@{user.username}" if user.username else "") or f"Cliente {user.id}"
+    raw_name = user.full_name or f"Cliente {user.id}"
+    if user.username:
+        raw_name = f"{raw_name} · @{user.username}"
     topic_name = re.sub(r"\s+", " ", raw_name).strip()[:120]
     try:
         topic = await update.get_bot().create_forum_topic(
@@ -582,21 +662,38 @@ async def forum_operator_message(update: Update, context: ContextTypes.DEFAULT_T
     if (not msg or not chat or not forum_chat_id
             or str(chat.id) != forum_chat_id
             or not msg.is_topic_message or not msg.message_thread_id
-            or (msg.text or "").startswith("/")
             or (update.effective_user and update.effective_user.is_bot)):
         return
     mapping = await crm_topic_lookup(message_thread_id=msg.message_thread_id)
     if not mapping.get("telegram_chat_id"):
         await msg.reply_text("⚠️ Questo Topic non e' ancora collegato a un cliente.")
         return
+    command = ((msg.text or "").strip().split(maxsplit=1) or [""])[0].split("@", 1)[0].lower()
+    if command in ("/stop", "/accendi"):
+        mode = "stop" if command == "/stop" else "on"
+        result = await crm_set_ai_control(int(mapping["telegram_chat_id"]), mode)
+        if not result.get("ok"):
+            await msg.reply_text("⚠️ Non sono riuscito a modificare lo stato dell'IA. Riprova tra poco.")
+            return
+        if mode == "stop":
+            await msg.reply_text("⛔ IA spenta per questo cliente. Rimarra' ferma finche' non scrivi /accendi.")
+        else:
+            await msg.reply_text("✅ IA riattivata subito per questo cliente.")
+        return
+    if (msg.text or "").startswith("/"):
+        return
     try:
         if msg.text:
+            body, translated = await google_translate_from_italian(
+                msg.text, str(mapping.get("language") or "it"),
+            )
             await context.bot.send_message(
                 chat_id=int(mapping["telegram_chat_id"]),
-                text=msg.text,
+                text=body,
                 disable_web_page_preview=True,
             )
-            body = msg.text
+            if str(mapping.get("language") or "it") != "it" and not translated:
+                await msg.reply_text("⚠️ Google Translate non disponibile: il messaggio e' stato inviato in italiano.")
         else:
             await context.bot.copy_message(
                 chat_id=int(mapping["telegram_chat_id"]),
@@ -605,6 +702,9 @@ async def forum_operator_message(update: Update, context: ContextTypes.DEFAULT_T
             )
             body = msg.caption or "Allegato inviato dall'operatore"
         await crm_record_forum_reply(mapping, body)
+        pause = await crm_set_ai_control(int(mapping["telegram_chat_id"]), "pause_1h")
+        if pause.get("ok"):
+            await msg.reply_text("⏸ IA in pausa per 1 ora. /stop per fermarla, /accendi per riattivarla.")
     except Exception as exc:
         log.warning("Risposta Topic -> cliente fallita: %s", exc)
         await msg.reply_text("⚠️ Invio al cliente non riuscito. Riprova tra poco.")
@@ -763,6 +863,8 @@ async def record_message(update: Update, direction="in", body: str | None = None
     if not update.effective_user or not update.effective_chat:
         return {}
     user = update.effective_user
+    if direction not in ("out", "outbound"):
+        await crm_store_language(update)
     if body is None:
         body = update.effective_message.text if update.effective_message else ""
     payload = {
