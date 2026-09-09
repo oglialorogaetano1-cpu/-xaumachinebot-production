@@ -71,6 +71,52 @@ PU_PRIME_NOT_FOUND = (
     "Hai scritto bene nome e cognome?"
 )
 
+PU_PRIME_FULL_GUIDE = (
+    "✅ GUIDA UFFICIALE PU PRIME – COPY TRADING\n\n"
+    "⚠️ PRIMA DI INIZIARE\n"
+    "Seleziona ESATTAMENTE:\n"
+    "👉 Copy Popular Trading\n"
+    "👉 Tipo conto: Standard\n"
+    "👉 Valuta: EUR o valuta locale\n"
+    "❗ Tipo conto sbagliato = il bot non si attiva\n\n"
+    "🎁 BONUS — PRIMA DI DEPOSITARE\n"
+    "Nuovo cliente: bonus 100%. Cliente esistente: bonus 20%.\n\n"
+    "• Vai su Promozioni → attiva PRIMA di depositare\n"
+    "Esempio: 1.000€ → operi con 2.000€\n"
+    "📌 Il bonus non può essere prelevato — solo i profitti generati da esso.\n\n"
+    "💳 DEPOSITO\n"
+    "• Inserisci importo — nessun voucher — conferma pagamento\n"
+    "❗ Solo sul conto Copy Popular Trading Standard\n\n"
+    "🤖 ATTIVAZIONE BOT\n"
+    "Nome: AltairFx\n"
+    "Numero strategia: B10146315\n"
+    "⚙️ Copy Mode → Equivalent Used Margin\n"
+    "⚙️ Investment → 100% del capitale totale\n"
+    "⚙️ Used Margin Equivalent → 1\n"
+    "⚙️ Stop Loss → 95%\n"
+    "⚙️ Take Profit → Off\n"
+    "✅ Conferma\n\n"
+    "📊 MONITORAGGIO\n"
+    "Solo app PU Prime. Non MT4 o MT5.\n\n"
+    "💸 PRELIEVI\n"
+    "👉 Bot → Gestisci → Rimuovi fondi → Inserisci importo\n"
+    "📌 Orario consigliato: intorno alle 22:00 ora europea.\n"
+    "📌 Il bonus non può essere prelevato.\n\n"
+    "⚠️ AVVISO IB\n"
+    "Devi rimanere registrato sotto il nostro IB per usare il bot.\n"
+    "❗ Se cambi IB dopo l’attivazione verrai rimosso automaticamente.\n\n"
+    "📈 INTERESSE COMPOSTO\n"
+    "Lasciare il capitale senza prelevare attiva l’effetto interesse composto.\n"
+    "⚠️ Non è un consiglio finanziario. Il trading comporta il rischio di perdita.\n\n"
+    "🎥 VIDEO GUIDE\n"
+    "Prelievo: https://youtube.com/shorts/H3ww7mf1W5s\n\n"
+    "📢 CANALE CLIENTI\n"
+    "👉 https://t.me/+B4B1GKoSTXY0ZDE0\n\n"
+    "📸 CONFERMA FINALE\n"
+    "Mandami uno screenshot di entrambi i bot attivi così verifico che tutto sia impostato correttamente 👍\n\n"
+    "— Support XauMachineAi"
+)
+
 DEFAULT_WELCOME_MESSAGE = "Ciao 👋 Benvenuto in XAU Machine! 🚀\n\nSe hai già le idee chiare e vuoi unirti a noi, ecco il percorso rapido 👇\n\n🆕 DEVI ANCORA REGISTRARTI?\n\n🔗 Registrati su PU Prime da questo link:\nhttps://puvip.co/la-partners/Pvzi1lQC\n\n• Lascia vuoto “Codice di riferimento”\n• Completa la verifica del documento\n• Inviami Nome e Cognome per controllare il collegamento ✅\n\n⚠️ Non depositare ancora: aspetta la mia conferma e la guida per aprire il conto corretto:\n\n• Copy Popular Trading\n• Standard\n• Valuta EUR\n• Nessun voucher\n\n♻️ HAI GIÀ PU PRIME?\n\nScrivimi prima di procedere. Ti guiderò nel trasferimento utilizzando il codice IB:\n\n👉 23217421\n\n📊 SALA SEGNALI\n\nPuoi entrare gratuitamente per 24 ore e copiare tutti i nostri segnali 👇\n\nhttps://t.me/+-e1_tDFps0Q2YmE0\n\nSe vuoi iniziare subito, scrivimi cosa hai già fatto. Se invece vuoi conoscere risultati, rischi, differenze tra bot e sala segnali o capire come funziona tutto, chiedimi pure liberamente 😊"
 
 # ---------------------------------------------------------- richieste MT5
@@ -766,7 +812,7 @@ async def verify_ib(update, context):
     await msg.reply_text(risposta)
     await record_message(update, "out", risposta, "ai")
 async def deposit(update, context): await simple_reply(update, "Per assistenza sul deposito non inviare password o codici. Posso passare la richiesta a un operatore.")
-async def guide(update, context): await simple_reply(update, "📘 Guida configurazione PU Prime\n\n1. Vai su Conti.\n2. Seleziona Copy Popular Trading.\n3. Scegli Standard.\n4. Seleziona EUR oppure la tua valuta locale.\n5. Non inserire alcun voucher.\n6. Completa la creazione del conto.\n7. Mandami il numero del nuovo conto oppure uno screenshot.\n\n⚠️ Non effettuare ancora il deposito: prima controllo la configurazione.\n\n— Support XauMachineAi")
+async def guide(update, context): await simple_reply(update, PU_PRIME_FULL_GUIDE)
 
 async def screenshot(update, context):
     msg = update.effective_message
@@ -855,19 +901,9 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             and origine_match in {"candidate_name", "account_or_user_id", "telegram_profile_name"}):
         nome_cliente = verifica_puprime.get("name") or ""
         risposta_match = (
-            f"✅ Perfetto{', ' + nome_cliente if nome_cliente else ''}: la registrazione "
-            "PU Prime risulta confermata.\n\n"
-            "Ora apri l’app PU Prime e segui questi passaggi:\n\n"
-            "1. Vai su Conti.\n"
-            "2. Seleziona Copy Popular Trading.\n"
-            "3. Scegli il conto Standard.\n"
-            "4. Seleziona EUR oppure la tua valuta locale.\n"
-            "5. Non inserire alcun voucher.\n"
-            "6. Completa la creazione del conto.\n"
-            "7. Mandami qui il numero del nuovo conto oppure uno screenshot.\n\n"
-            "⚠️ Non effettuare ancora il deposito: prima controllo che conto, "
-            "piattaforma e valuta siano configurati correttamente.\n\n"
-            "— Support XauMachineAi"
+            f"✅ Perfetto{', ' + nome_cliente if nome_cliente else ''}: "
+            "la registrazione PU Prime risulta confermata.\n\n"
+            + PU_PRIME_FULL_GUIDE
         )
         await msg.reply_text(risposta_match)
         await record_message(update, "out", risposta_match, "ai")
