@@ -481,6 +481,31 @@ async def crm_topic_save(*, telegram_user_id: int, telegram_chat_id: int,
     if not forum_chat_id or not CRM_TRACKING_SECRET:
         return False
 
+    headers = dict(CRM_HEADERS)
+    headers.pop("Prefer", None)
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.post(
+                f"{SUPABASE_URL}/rest/v1/rpc/crm_upsert_telegram_topic",
+                headers=headers,
+                json={
+                    "p_secret": CRM_TRACKING_SECRET,
+                    "p_tenant_slug": CRM_TENANT_SLUG,
+                    "p_telegram_user_id": telegram_user_id,
+                    "p_telegram_chat_id": telegram_chat_id,
+                    "p_forum_chat_id": int(forum_chat_id),
+                    "p_message_thread_id": message_thread_id,
+                    "p_topic_name": topic_name,
+                },
+            )
+        if r.status_code >= 300:
+            log.warning("Salvataggio Topic CRM fallito %s: %s", r.status_code, r.text[:200])
+            return False
+        return True
+    except Exception as exc:
+        log.warning("Salvataggio Topic CRM non disponibile: %s", exc)
+        return False
+
 
 async def crm_store_language(update: Update) -> None:
     """Salva la lingua Telegram del cliente per le risposte manuali tradotte."""
@@ -557,30 +582,6 @@ async def google_translate_from_italian(text: str, target_language: str) -> tupl
     except Exception as exc:
         log.warning("Google Translate non disponibile: %s", exc)
         return text, False
-    headers = dict(CRM_HEADERS)
-    headers.pop("Prefer", None)
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            r = await client.post(
-                f"{SUPABASE_URL}/rest/v1/rpc/crm_upsert_telegram_topic",
-                headers=headers,
-                json={
-                    "p_secret": CRM_TRACKING_SECRET,
-                    "p_tenant_slug": CRM_TENANT_SLUG,
-                    "p_telegram_user_id": telegram_user_id,
-                    "p_telegram_chat_id": telegram_chat_id,
-                    "p_forum_chat_id": int(forum_chat_id),
-                    "p_message_thread_id": message_thread_id,
-                    "p_topic_name": topic_name,
-                },
-            )
-        if r.status_code >= 300:
-            log.warning("Salvataggio Topic CRM fallito %s: %s", r.status_code, r.text[:200])
-            return False
-        return True
-    except Exception as exc:
-        log.warning("Salvataggio Topic CRM non disponibile: %s", exc)
-        return False
 
 
 async def ensure_customer_topic(update: Update) -> int | None:
