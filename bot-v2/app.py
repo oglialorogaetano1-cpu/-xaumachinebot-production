@@ -777,6 +777,25 @@ async def ensure_outbox_topic(app, row: dict) -> int | None:
     return thread_id
 
 
+async def ack_followup_topic_mirror(followup_id: str | None) -> None:
+    if not followup_id:
+        return
+    headers = dict(CRM_HEADERS)
+    headers.pop("Prefer", None)
+    async with httpx.AsyncClient(timeout=10) as client:
+        r = await client.post(
+            f"{SUPABASE_URL}/rest/v1/rpc/crm_ack_topic_mirror",
+            headers=headers,
+            json={
+                "p_secret": CRM_TRACKING_SECRET,
+                "p_tenant_slug": CRM_TENANT_SLUG,
+                "p_followup_id": followup_id,
+            },
+        )
+    if r.status_code >= 300:
+        raise RuntimeError(f"ACK Topic {r.status_code}: {r.text[:160]}")
+
+
 async def forward_followup_to_topic(app, row: dict) -> None:
     """Replica ogni follow-up consegnato nel Topic CRM del cliente."""
     try:
@@ -792,6 +811,7 @@ async def forward_followup_to_topic(app, row: dict) -> None:
             text="📤 Follow-up inviato al cliente\n\n" + body,
             disable_web_page_preview=True,
         )
+        await ack_followup_topic_mirror(row.get("id"))
         log.info("Follow-up inoltrato nel Topic CRM: %s -> thread %s", row.get("id"), thread_id)
     except Exception as exc:
         log.warning("Forward follow-up nel Topic CRM fallito %s: %s", row.get("id"), exc)
