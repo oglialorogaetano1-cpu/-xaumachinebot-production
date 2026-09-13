@@ -7,7 +7,7 @@ import threading
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import httpx
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, ChatJoinRequestHandler, CommandHandler, MessageHandler, ContextTypes, filters
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -40,10 +40,34 @@ LEOTRADING_WELCOME_MESSAGE = (
     "Your request to join the private channel has been received and your access is being approved.\n\n"
     "Would you like to activate the automated XAU Machine setup? Reply here and I’ll guide you step by step. "
     "Before activation, we verify that your PU Prime account is correctly linked to our IB; a written confirmation alone is not enough.\n\n"
-    "Start or continue with the support bot:\n"
-    "https://t.me/XauMachineAisupport_bot?start=tg_en_leotrading\n\n"
     "Trading involves risk of loss."
 )
+ALICE_INVITE_LINK = "https://t.me/+jYBiDAXeGB40MWNk"
+ALICE_SOURCE = "tg_it_alice"
+ALICE_WELCOME_MESSAGE = (
+    "Benvenuto in Alice Trading 👋\n\n"
+    "La tua richiesta di accesso al canale privato è stata ricevuta e stiamo approvando il tuo ingresso.\n\n"
+    "Vuoi attivare XAU Machine e automatizzare il copy trading? Scrivimi qui e ti guiderò passo dopo passo. "
+    "Prima dell’attivazione verificheremo che il tuo conto PU Prime sia realmente collegato al nostro IB: "
+    "non basta una semplice conferma scritta.\n\n"
+    "Il trading comporta rischio di perdita."
+)
+CHANNEL_JOIN_CAMPAIGNS = {
+    LEOTRADING_INVITE_LINK: {
+        "source": LEOTRADING_SOURCE,
+        "language": "en",
+        "welcome": LEOTRADING_WELCOME_MESSAGE,
+        "button_text": "START XAU MACHINE 🚀",
+        "button_url": "https://t.me/XauMachineAisupport_bot?start=tg_en_leotrading",
+    },
+    ALICE_INVITE_LINK: {
+        "source": ALICE_SOURCE,
+        "language": "it",
+        "welcome": ALICE_WELCOME_MESSAGE,
+        "button_text": "AVVIA XAU MACHINE 🚀",
+        "button_url": "https://t.me/XauMachineAisupport_bot?start=tg_it_alice",
+    },
+}
 
 
 class HealthHandler(BaseHTTPRequestHandler):
@@ -1387,7 +1411,7 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await record_message(update, "out", risposta, "ai")
 
 
-async def crm_track_channel_join(request, event_status: str, error: str = "") -> dict:
+async def crm_track_channel_join(request, campaign: dict, event_status: str, error: str = "") -> dict:
     """Registra in modo idempotente richiesta, benvenuto e approvazione."""
     invite_link = request.invite_link.invite_link if request.invite_link else ""
     headers = dict(CRM_HEADERS)
@@ -1402,8 +1426,8 @@ async def crm_track_channel_join(request, event_status: str, error: str = "") ->
         "p_full_name": request.from_user.full_name or "",
         "p_username": request.from_user.username or "",
         "p_invite_link": invite_link,
-        "p_source": LEOTRADING_SOURCE,
-        "p_language": "en",
+        "p_source": campaign["source"],
+        "p_language": campaign["language"],
         "p_event_status": event_status,
         "p_error": error[:1000],
     }
@@ -1429,20 +1453,24 @@ async def channel_join_request(update: Update, context: ContextTypes.DEFAULT_TYP
     if not request:
         return
     used_link = request.invite_link.invite_link if request.invite_link else ""
-    if LEOTRADING_INVITE_LINK and used_link != LEOTRADING_INVITE_LINK:
+    campaign = CHANNEL_JOIN_CAMPAIGNS.get(used_link)
+    if not campaign:
         return
 
-    tracked = await crm_track_channel_join(request, "requested")
+    tracked = await crm_track_channel_join(request, campaign, "requested")
     if not tracked.get("already_welcomed"):
         try:
             await context.bot.send_message(
                 chat_id=request.user_chat_id,
-                text=LEOTRADING_WELCOME_MESSAGE,
+                text=campaign["welcome"],
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton(campaign["button_text"], url=campaign["button_url"])
+                ]]),
                 disable_web_page_preview=True,
             )
-            await crm_track_channel_join(request, "welcomed")
+            await crm_track_channel_join(request, campaign, "welcomed")
         except Exception as exc:
-            await crm_track_channel_join(request, "welcome_failed", str(exc))
+            await crm_track_channel_join(request, campaign, "welcome_failed", str(exc))
             log.warning("Benvenuto richiesta canale fallito per %s: %s", request.from_user.id, exc)
 
     try:
@@ -1450,39 +1478,43 @@ async def channel_join_request(update: Update, context: ContextTypes.DEFAULT_TYP
             chat_id=request.chat.id,
             user_id=request.from_user.id,
         )
-        await crm_track_channel_join(request, "approved")
+        await crm_track_channel_join(request, campaign, "approved")
     except Exception as exc:
-        await crm_track_channel_join(request, "approval_failed", str(exc))
+        await crm_track_channel_join(request, campaign, "approval_failed", str(exc))
         log.warning("Approvazione richiesta canale fallita per %s: %s", request.from_user.id, exc)
 
 
 async def channel_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Mostra all'amministratore i conteggi del funnel LeoTrading."""
+    """Mostra all'amministratore i conteggi separati per campagna."""
     if not update.effective_chat or not is_admin_chat(update.effective_chat.id):
         return
     headers = dict(CRM_HEADERS)
     headers.pop("Prefer", None)
     try:
+        sezioni = []
+        sorgenti = (("LeoTrading English", LEOTRADING_SOURCE), ("Alice Trading IT", ALICE_SOURCE))
         async with httpx.AsyncClient(timeout=12) as client:
-            response = await client.post(
-                f"{SUPABASE_URL}/rest/v1/rpc/crm_channel_join_stats",
-                headers=headers,
-                json={
-                    "p_secret": CRM_TRACKING_SECRET,
-                    "p_tenant_slug": CRM_TENANT_SLUG,
-                    "p_source": LEOTRADING_SOURCE,
-                },
-            )
-        response.raise_for_status()
-        stats = response.json() or {}
-        await update.effective_message.reply_text(
-            "📊 LeoTrading channel\n"
-            f"Persone uniche: {stats.get('unique_users', 0)}\n"
-            f"Richieste totali: {stats.get('requests', 0)}\n"
-            f"Benvenuti inviati: {stats.get('welcomed', 0)}\n"
-            f"Accessi approvati: {stats.get('approved', 0)}\n"
-            f"Errori aperti: {stats.get('errors', 0)}"
-        )
+            for nome, source in sorgenti:
+                response = await client.post(
+                    f"{SUPABASE_URL}/rest/v1/rpc/crm_channel_join_stats",
+                    headers=headers,
+                    json={
+                        "p_secret": CRM_TRACKING_SECRET,
+                        "p_tenant_slug": CRM_TENANT_SLUG,
+                        "p_source": source,
+                    },
+                )
+                response.raise_for_status()
+                stats = response.json() or {}
+                sezioni.append(
+                    f"📊 {nome}\n"
+                    f"Persone uniche: {stats.get('unique_users', 0)}\n"
+                    f"Richieste: {stats.get('requests', 0)} · "
+                    f"Benvenuti: {stats.get('welcomed', 0)} · "
+                    f"Approvati: {stats.get('approved', 0)} · "
+                    f"Errori: {stats.get('errors', 0)}"
+                )
+        await update.effective_message.reply_text("\n\n".join(sezioni))
     except Exception as exc:
         log.warning("Statistiche ingresso canale non disponibili: %s", exc)
         await update.effective_message.reply_text("⚠️ Statistiche non disponibili in questo momento.")
