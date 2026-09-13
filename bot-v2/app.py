@@ -748,26 +748,47 @@ async def crm_ai_attiva(chat_id: int) -> bool:
         log.warning("Controllo stato IA non riuscito, IA resta attiva: %s", exc)
     return True
 
+async def ensure_outbox_topic(app, row: dict) -> int | None:
+    """Recupera o crea il Topic anche per lead nati prima dell'attivazione Forum."""
+    forum = support_forum_chat_id()
+    chat_id = int(str(row.get("telegram_chat_id") or "0"))
+    if not forum or not chat_id:
+        return None
+    mapping = await crm_topic_lookup(telegram_user_id=chat_id)
+    if mapping.get("message_thread_id"):
+        return int(mapping["message_thread_id"])
+    raw_name = str(row.get("full_name") or f"Cliente {chat_id}")
+    topic_name = re.sub(r"\\s+", " ", raw_name).strip()[:120]
+    topic = await app.bot.create_forum_topic(chat_id=int(forum), name=topic_name)
+    thread_id = int(topic.message_thread_id)
+    saved = await crm_topic_save(
+        telegram_user_id=chat_id,
+        telegram_chat_id=chat_id,
+        message_thread_id=thread_id,
+        topic_name=topic_name,
+    )
+    if not saved:
+        log.warning("Topic follow-up creato ma associazione CRM non salvata: %s", thread_id)
+    await app.bot.send_message(
+        chat_id=int(forum),
+        message_thread_id=thread_id,
+        text=f"👤 Conversazione recuperata dal CRM\\nNome: {topic_name}\\nTelegram ID: {chat_id}",
+    )
+    return thread_id
+
+
 async def forward_followup_to_topic(app, row: dict) -> None:
-    """Replica ogni follow-up già consegnato nel Topic CRM del cliente."""
+    """Replica ogni follow-up consegnato nel Topic CRM del cliente."""
     try:
-        forum = support_forum_chat_id()
-        if not forum:
-            return
-        chat_id = int(str(row.get("telegram_chat_id") or "0"))
-        if not chat_id:
-            return
-        mapping = await crm_topic_lookup(telegram_user_id=chat_id)
-        thread_id = mapping.get("message_thread_id")
+        thread_id = await ensure_outbox_topic(app, row)
         if not thread_id:
-            log.warning("Topic CRM non trovato per follow-up %s (chat %s)", row.get("id"), chat_id)
             return
         body = str(row.get("body") or "").strip()
         if not body:
             return
         await app.bot.send_message(
-            chat_id=int(forum),
-            message_thread_id=int(thread_id),
+            chat_id=int(support_forum_chat_id()),
+            message_thread_id=thread_id,
             text="📤 Follow-up inviato al cliente\n\n" + body,
             disable_web_page_preview=True,
         )
