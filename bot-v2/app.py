@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import httpx
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
+from telegram.ext import Application, ChatJoinRequestHandler, CommandHandler, MessageHandler, ContextTypes, filters
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("xau-bot-v2")
@@ -31,6 +31,19 @@ MT5_INVESTOR_LOGIN = os.environ.get("MT5_INVESTOR_LOGIN", "")
 MT5_INVESTOR_PASSWORD = os.environ.get("MT5_INVESTOR_PASSWORD", "")
 GOOGLE_TRANSLATE_API_KEY = os.environ.get("GOOGLE_TRANSLATE_API_KEY", "").strip()
 SIGNAL_ROOM_URL = "https://t.me/+-e1_tDFps0Q2YmE0"
+LEOTRADING_INVITE_LINK = os.environ.get(
+    "LEOTRADING_INVITE_LINK", "https://t.me/+G8e61TgHAl5lNDQ0"
+).strip()
+LEOTRADING_SOURCE = "tg_en_leotrading"
+LEOTRADING_WELCOME_MESSAGE = (
+    "Welcome to LeoTrading 👋\n\n"
+    "Your request to join the private channel has been received and your access is being approved.\n\n"
+    "Would you like to activate the automated XAU Machine setup? Reply here and I’ll guide you step by step. "
+    "Before activation, we verify that your PU Prime account is correctly linked to our IB; a written confirmation alone is not enough.\n\n"
+    "Start or continue with the support bot:\n"
+    "https://t.me/XauMachineAisupport_bot?start=tg_en_leotrading\n\n"
+    "Trading involves risk of loss."
+)
 
 
 class HealthHandler(BaseHTTPRequestHandler):
@@ -1373,6 +1386,107 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.reply_text(risposta, disable_web_page_preview=True)
     await record_message(update, "out", risposta, "ai")
 
+
+async def crm_track_channel_join(request, event_status: str, error: str = "") -> dict:
+    """Registra in modo idempotente richiesta, benvenuto e approvazione."""
+    invite_link = request.invite_link.invite_link if request.invite_link else ""
+    headers = dict(CRM_HEADERS)
+    headers.pop("Prefer", None)
+    payload = {
+        "p_secret": CRM_TRACKING_SECRET,
+        "p_tenant_slug": CRM_TENANT_SLUG,
+        "p_channel_chat_id": request.chat.id,
+        "p_channel_title": request.chat.title or "",
+        "p_telegram_user_id": request.from_user.id,
+        "p_user_chat_id": request.user_chat_id,
+        "p_full_name": request.from_user.full_name or "",
+        "p_username": request.from_user.username or "",
+        "p_invite_link": invite_link,
+        "p_source": LEOTRADING_SOURCE,
+        "p_language": "en",
+        "p_event_status": event_status,
+        "p_error": error[:1000],
+    }
+    try:
+        async with httpx.AsyncClient(timeout=12) as client:
+            response = await client.post(
+                f"{SUPABASE_URL}/rest/v1/rpc/crm_track_channel_join",
+                headers=headers,
+                json=payload,
+            )
+        if response.status_code >= 300:
+            log.warning("Tracciamento ingresso canale fallito %s: %s", response.status_code, response.text[:200])
+            return {}
+        return response.json() or {}
+    except Exception as exc:
+        log.warning("Tracciamento ingresso canale non disponibile: %s", exc)
+        return {}
+
+
+async def channel_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Accoglie e approva automaticamente le richieste del link LeoTrading EN."""
+    request = update.chat_join_request
+    if not request:
+        return
+    used_link = request.invite_link.invite_link if request.invite_link else ""
+    if LEOTRADING_INVITE_LINK and used_link != LEOTRADING_INVITE_LINK:
+        return
+
+    tracked = await crm_track_channel_join(request, "requested")
+    if not tracked.get("already_welcomed"):
+        try:
+            await context.bot.send_message(
+                chat_id=request.user_chat_id,
+                text=LEOTRADING_WELCOME_MESSAGE,
+                disable_web_page_preview=True,
+            )
+            await crm_track_channel_join(request, "welcomed")
+        except Exception as exc:
+            await crm_track_channel_join(request, "welcome_failed", str(exc))
+            log.warning("Benvenuto richiesta canale fallito per %s: %s", request.from_user.id, exc)
+
+    try:
+        await context.bot.approve_chat_join_request(
+            chat_id=request.chat.id,
+            user_id=request.from_user.id,
+        )
+        await crm_track_channel_join(request, "approved")
+    except Exception as exc:
+        await crm_track_channel_join(request, "approval_failed", str(exc))
+        log.warning("Approvazione richiesta canale fallita per %s: %s", request.from_user.id, exc)
+
+
+async def channel_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Mostra all'amministratore i conteggi del funnel LeoTrading."""
+    if not update.effective_chat or not is_admin_chat(update.effective_chat.id):
+        return
+    headers = dict(CRM_HEADERS)
+    headers.pop("Prefer", None)
+    try:
+        async with httpx.AsyncClient(timeout=12) as client:
+            response = await client.post(
+                f"{SUPABASE_URL}/rest/v1/rpc/crm_channel_join_stats",
+                headers=headers,
+                json={
+                    "p_secret": CRM_TRACKING_SECRET,
+                    "p_tenant_slug": CRM_TENANT_SLUG,
+                    "p_source": LEOTRADING_SOURCE,
+                },
+            )
+        response.raise_for_status()
+        stats = response.json() or {}
+        await update.effective_message.reply_text(
+            "📊 LeoTrading channel\n"
+            f"Persone uniche: {stats.get('unique_users', 0)}\n"
+            f"Richieste totali: {stats.get('requests', 0)}\n"
+            f"Benvenuti inviati: {stats.get('welcomed', 0)}\n"
+            f"Accessi approvati: {stats.get('approved', 0)}\n"
+            f"Errori aperti: {stats.get('errors', 0)}"
+        )
+    except Exception as exc:
+        log.warning("Statistiche ingresso canale non disponibili: %s", exc)
+        await update.effective_message.reply_text("⚠️ Statistiche non disponibili in questo momento.")
+
 async def on_error(update, context: ContextTypes.DEFAULT_TYPE):
     """Rete di sicurezza: qualunque eccezione non prevista finisce qui
     invece di far cadere il processo o restare silenziosa nei log."""
@@ -1397,8 +1511,9 @@ def main():
     threading.Thread(target=start_health_server, daemon=True, name="health-server").start()
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     app.add_error_handler(on_error)
-    for cmd, fn in {"start":start,"help":help_cmd,"registrazione":registration,"sala_segnali":signals,"verifica_ib":verify_ib,"deposito":deposit,"guida_bot":guide,"screenshot":screenshot,"intervento_umano":human,"attiva_supporto":activate_support_forum}.items():
+    for cmd, fn in {"start":start,"help":help_cmd,"registrazione":registration,"sala_segnali":signals,"verifica_ib":verify_ib,"deposito":deposit,"guida_bot":guide,"screenshot":screenshot,"intervento_umano":human,"attiva_supporto":activate_support_forum,"statistiche_canale":channel_stats}.items():
         app.add_handler(CommandHandler(cmd, fn))
+    app.add_handler(ChatJoinRequestHandler(channel_join_request))
     app.add_handler(MessageHandler(filters.ChatType.SUPERGROUP, forum_operator_message), group=1)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, text_message))
     log.info("XAU Machine Bot v2 online")
