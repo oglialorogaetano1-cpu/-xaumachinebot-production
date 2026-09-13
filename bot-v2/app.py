@@ -748,6 +748,34 @@ async def crm_ai_attiva(chat_id: int) -> bool:
         log.warning("Controllo stato IA non riuscito, IA resta attiva: %s", exc)
     return True
 
+async def forward_followup_to_topic(app, row: dict) -> None:
+    """Replica ogni follow-up già consegnato nel Topic CRM del cliente."""
+    try:
+        forum = support_forum_chat_id()
+        if not forum:
+            return
+        chat_id = int(str(row.get("telegram_chat_id") or "0"))
+        if not chat_id:
+            return
+        mapping = await crm_topic_lookup(telegram_user_id=chat_id)
+        thread_id = mapping.get("message_thread_id")
+        if not thread_id:
+            log.warning("Topic CRM non trovato per follow-up %s (chat %s)", row.get("id"), chat_id)
+            return
+        body = str(row.get("body") or "").strip()
+        if not body:
+            return
+        await app.bot.send_message(
+            chat_id=int(forum),
+            message_thread_id=int(thread_id),
+            text="📤 Follow-up inviato al cliente\n\n" + body,
+            disable_web_page_preview=True,
+        )
+        log.info("Follow-up inoltrato nel Topic CRM: %s -> thread %s", row.get("id"), thread_id)
+    except Exception as exc:
+        log.warning("Forward follow-up nel Topic CRM fallito %s: %s", row.get("id"), exc)
+
+
 async def poll_operator_outbox(app) -> None:
     headers = dict(CRM_HEADERS); headers.pop("Prefer", None)
     await asyncio.sleep(3)
@@ -764,6 +792,7 @@ async def poll_operator_outbox(app) -> None:
                     await app.bot.send_message(chat_id=row["telegram_chat_id"], text=row["body"])
                     success = True
                     log.info("Messaggio operatore inviato su Telegram: %s", row.get("id"))
+                    await forward_followup_to_topic(app, row)
                 except Exception as exc:
                     error_text = str(exc)
                     log.warning("Invio messaggio operatore %s fallito: %s", row.get("id"), exc)
