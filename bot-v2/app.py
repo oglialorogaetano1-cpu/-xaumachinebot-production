@@ -1554,4 +1554,4 @@ def main():
 if __name__ == "__main__":
     main()
 
-# Railway deployment marker: LeoTrading join tracking and English welcome.
+# Railway deployment marker: LeoTrading EN and Alice Trading IT onboarding.
