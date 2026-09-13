@@ -797,6 +797,35 @@ async def forward_followup_to_topic(app, row: dict) -> None:
         log.warning("Forward follow-up nel Topic CRM fallito %s: %s", row.get("id"), exc)
 
 
+async def backfill_unmirrored_followups(app) -> None:
+    """Copia nei Topic i follow-up storici già consegnati, senza reinviarli ai clienti."""
+    if not CRM_TRACKING_SECRET or not support_forum_chat_id():
+        return
+    headers = dict(CRM_HEADERS)
+    headers.pop("Prefer", None)
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.post(
+                f"{SUPABASE_URL}/rest/v1/rpc/crm_get_unmirrored_followups",
+                headers=headers,
+                json={
+                    "p_secret": CRM_TRACKING_SECRET,
+                    "p_tenant_slug": CRM_TENANT_SLUG,
+                    "p_limit": 200,
+                },
+            )
+        if r.status_code >= 300:
+            log.warning("Recupero follow-up storici fallito %s: %s", r.status_code, r.text[:200])
+            return
+        rows = r.json() or []
+        for row in rows:
+            await forward_followup_to_topic(app, row)
+        if rows:
+            log.info("Recupero Topic completato: %s follow-up storici copiati", len(rows))
+    except Exception as exc:
+        log.warning("Recupero follow-up storici non disponibile: %s", exc)
+
+
 async def poll_operator_outbox(app) -> None:
     headers = dict(CRM_HEADERS); headers.pop("Prefer", None)
     await asyncio.sleep(3)
@@ -1342,6 +1371,7 @@ async def post_init(app):
         ACTIVE_SUPPORT_FORUM_CHAT_ID = configured_forum
     log.info("Telegram support Forum configured: %s", bool(support_forum_chat_id()))
     app.create_task(poll_operator_outbox(app), name="crm-operator-outbox")
+    app.create_task(backfill_unmirrored_followups(app), name="crm-topic-backfill")
 
 def main():
     threading.Thread(target=start_health_server, daemon=True, name="health-server").start()
