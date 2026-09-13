@@ -1522,4 +1522,4 @@ def main():
 if __name__ == "__main__":
     main()
 
-# Railway deployment marker: Telegram forum bridge with automatic topic recovery.
+# Railway deployment marker: LeoTrading join tracking and English welcome.
