@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import httpx
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import Application, ChatJoinRequestHandler, CommandHandler, MessageHandler, ContextTypes, filters
+from telegram.ext import Application, ChatJoinRequestHandler, ChatMemberHandler, CommandHandler, MessageHandler, ContextTypes, filters
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("xau-bot-v2")
@@ -31,6 +31,15 @@ MT5_INVESTOR_LOGIN = os.environ.get("MT5_INVESTOR_LOGIN", "")
 MT5_INVESTOR_PASSWORD = os.environ.get("MT5_INVESTOR_PASSWORD", "")
 GOOGLE_TRANSLATE_API_KEY = os.environ.get("GOOGLE_TRANSLATE_API_KEY", "").strip()
 SIGNAL_ROOM_URL = "https://t.me/+-e1_tDFps0Q2YmE0"
+SIGNAL_ROOM_SOURCE = "signal_room_24h"
+SIGNAL_ROOM_WELCOME_MESSAGE = (
+    "👋 Benvenuto nella sala segnali XAU Machine.\n\n"
+    "Il tuo accesso gratuito dura 24 ore. Per restare nella sala dopo la prova, "
+    "avvia il bot e inviaci nome e cognome: controlleremo automaticamente che il "
+    "conto PU Prime sia realmente registrato sotto il nostro IB.\n\n"
+    "Una semplice conferma scritta non è sufficiente: la verifica viene effettuata "
+    "direttamente nel CRM PU Prime."
+)
 LEOTRADING_INVITE_LINK = os.environ.get(
     "LEOTRADING_INVITE_LINK", "https://t.me/+G8e61TgHAl5lNDQ0"
 ).strip()
@@ -64,6 +73,13 @@ ALICE_WELCOME_MESSAGE = (
     "oppure parti da zero? 😊"
 )
 CHANNEL_JOIN_CAMPAIGNS = {
+    SIGNAL_ROOM_URL: {
+        "source": SIGNAL_ROOM_SOURCE,
+        "language": "it",
+        "welcome": SIGNAL_ROOM_WELCOME_MESSAGE,
+        "button_text": "VERIFICA ACCESSO PU PRIME ✅",
+        "button_url": "https://t.me/XauMachineAisupport_bot?start=signal_room_24h",
+    },
     LEOTRADING_INVITE_LINK: {
         "source": LEOTRADING_SOURCE,
         "language": "en",
@@ -1458,8 +1474,139 @@ async def crm_track_channel_join(request, campaign: dict, event_status: str, err
         return {}
 
 
+async def crm_track_signal_room_member(member_update, event_status: str = "approved") -> dict:
+    """Registra un ingresso diretto nella sala segnali usando lo stesso RPC protetto."""
+    invite_link = member_update.invite_link.invite_link if member_update.invite_link else ""
+    user = member_update.new_chat_member.user
+    headers = dict(CRM_HEADERS)
+    headers.pop("Prefer", None)
+    payload = {
+        "p_secret": CRM_TRACKING_SECRET,
+        "p_tenant_slug": CRM_TENANT_SLUG,
+        "p_channel_chat_id": member_update.chat.id,
+        "p_channel_title": member_update.chat.title or "",
+        "p_telegram_user_id": user.id,
+        "p_user_chat_id": user.id,
+        "p_full_name": user.full_name or "",
+        "p_username": user.username or "",
+        "p_invite_link": invite_link,
+        "p_source": SIGNAL_ROOM_SOURCE,
+        "p_language": "it",
+        "p_event_status": event_status,
+        "p_error": "",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=12) as client:
+            response = await client.post(
+                f"{SUPABASE_URL}/rest/v1/rpc/crm_track_channel_join",
+                headers=headers,
+                json=payload,
+            )
+        if response.status_code >= 300:
+            log.warning("Tracciamento membro sala segnali fallito %s: %s", response.status_code, response.text[:200])
+            return {}
+        return response.json() or {}
+    except Exception as exc:
+        log.warning("Tracciamento membro sala segnali non disponibile: %s", exc)
+        return {}
+
+
+async def signal_room_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Avvia le 24 ore anche quando l'utente entra senza richiesta di approvazione."""
+    member_update = update.chat_member
+    if not member_update:
+        return
+    old_status = member_update.old_chat_member.status
+    new_status = member_update.new_chat_member.status
+    user = member_update.new_chat_member.user
+    invite_link = member_update.invite_link.invite_link if member_update.invite_link else ""
+    joined = old_status in ("left", "kicked") and new_status in ("member", "administrator", "creator")
+    if not joined or user.is_bot or invite_link != SIGNAL_ROOM_URL:
+        return
+    await crm_track_signal_room_member(member_update)
+
+
+async def record_signal_room_moderation(event_id: str, success: bool, error: str = "") -> None:
+    headers = dict(CRM_HEADERS)
+    headers.pop("Prefer", None)
+    payload = {
+        "p_secret": CRM_TRACKING_SECRET,
+        "p_tenant_slug": CRM_TENANT_SLUG,
+        "p_event_id": event_id,
+        "p_success": success,
+        "p_error": error[:1000],
+    }
+    async with httpx.AsyncClient(timeout=12) as client:
+        response = await client.post(
+            f"{SUPABASE_URL}/rest/v1/rpc/crm_record_signal_room_moderation",
+            headers=headers,
+            json=payload,
+        )
+        response.raise_for_status()
+
+
+async def poll_signal_room_expirations(app: Application) -> None:
+    """Ogni 5 minuti rimuove gli accessi scaduti non verificati nel CRM PU Prime."""
+    await asyncio.sleep(20)
+    headers = dict(CRM_HEADERS)
+    headers.pop("Prefer", None)
+    while True:
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                response = await client.post(
+                    f"{SUPABASE_URL}/rest/v1/rpc/crm_claim_expired_signal_room_members",
+                    headers=headers,
+                    json={
+                        "p_secret": CRM_TRACKING_SECRET,
+                        "p_tenant_slug": CRM_TENANT_SLUG,
+                        "p_limit": 100,
+                    },
+                )
+            response.raise_for_status()
+            expired = response.json() or []
+            for item in expired:
+                event_id = str(item["event_id"])
+                chat_id = int(item["channel_chat_id"])
+                user_id = int(item["telegram_user_id"])
+                try:
+                    await app.bot.ban_chat_member(chat_id=chat_id, user_id=user_id)
+                    try:
+                        await app.bot.unban_chat_member(
+                            chat_id=chat_id,
+                            user_id=user_id,
+                            only_if_banned=True,
+                        )
+                    except Exception as unban_exc:
+                        log.warning("Utente rimosso ma non sbloccato per il rientro %s: %s", user_id, unban_exc)
+                    await record_signal_room_moderation(event_id, True)
+                    log.info("Accesso sala segnali scaduto: utente %s rimosso da %s", user_id, chat_id)
+                    if ADMIN_CHAT_ID:
+                        try:
+                            await app.bot.send_message(
+                                chat_id=int(ADMIN_CHAT_ID),
+                                text=(
+                                    "🚫 Accesso sala segnali scaduto\n"
+                                    f"Cliente: {item.get('full_name') or user_id}\n"
+                                    "Motivo: non verificato nel CRM PU Prime dopo 24 ore."
+                                ),
+                            )
+                        except Exception as notify_exc:
+                            log.warning("Notifica admin rimozione fallita: %s", notify_exc)
+                except Exception as exc:
+                    log.warning("Rimozione sala segnali fallita per %s: %s", user_id, exc)
+                    try:
+                        await record_signal_room_moderation(event_id, False, str(exc))
+                    except Exception as record_exc:
+                        log.warning("Registrazione errore moderazione fallita: %s", record_exc)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.warning("Controllo scadenze sala segnali non disponibile: %s", exc)
+        await asyncio.sleep(300)
+
+
 async def channel_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Accoglie e approva automaticamente le richieste del link LeoTrading EN."""
+    """Accoglie, traccia e approva le richieste dei link configurati."""
     request = update.chat_join_request
     if not request:
         return
@@ -1549,6 +1696,8 @@ async def post_init(app):
     log.info("Telegram support Forum configured: %s", bool(support_forum_chat_id()))
     app.create_task(poll_operator_outbox(app), name="crm-operator-outbox")
     app.create_task(backfill_unmirrored_followups(app), name="crm-topic-backfill")
+    app.create_task(poll_signal_room_expirations(app), name="signal-room-24h-enforcement")
+    log.info("Signal room 24h enforcement enabled for %s", SIGNAL_ROOM_URL)
 
 def main():
     threading.Thread(target=start_health_server, daemon=True, name="health-server").start()
@@ -1557,6 +1706,7 @@ def main():
     for cmd, fn in {"start":start,"help":help_cmd,"registrazione":registration,"sala_segnali":signals,"verifica_ib":verify_ib,"deposito":deposit,"guida_bot":guide,"screenshot":screenshot,"intervento_umano":human,"attiva_supporto":activate_support_forum,"statistiche_canale":channel_stats}.items():
         app.add_handler(CommandHandler(cmd, fn))
     app.add_handler(ChatJoinRequestHandler(channel_join_request))
+    app.add_handler(ChatMemberHandler(signal_room_member_update, ChatMemberHandler.CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.ChatType.SUPERGROUP, forum_operator_message), group=1)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, text_message))
     log.info("XAU Machine Bot v2 online")
