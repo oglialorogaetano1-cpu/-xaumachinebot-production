@@ -1357,23 +1357,21 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     testo = msg.text or ""
     testo_lower = testo.lower()
-    if any(x in testo_lower for x in ("risultati", "risultato", "quanti tp", "quante tp", "quanti stop", "tp avete preso", "performance", "resoconto")):
-        # I report della sala e il funnel sono dati interni: non devono mai
-        # essere restituiti a un cliente, anche se usa parole come
-        # "risultati" nella chat privata. Solo l'ADMIN_CHAT_ID può riceverli.
-        if not is_admin_chat(update.effective_chat.id):
-            risposta_privata = "I report e i dati interni della sala sono riservati all'operatore. Per informazioni sulla sala segnali usa il link ufficiale."
-            await record_message(update, "in", testo, "lead")
-            await msg.reply_text(risposta_privata, disable_web_page_preview=True)
-            await record_message(update, "out", risposta_privata, "ai")
-            return
-        risposta = await sala_segnali_risultati(_rileva_periodo_sala(testo), _rileva_simbolo_sala(testo))
+    richiesta_report_sala = (
+        any(x in testo_lower for x in ("risultati", "risultato", "quanti tp", "quante tp", "quanti stop", "tp avete preso", "performance", "resoconto"))
+        and any(x in testo_lower for x in ("sala segnali", "sala signal", "signal room"))
+    )
+    if richiesta_report_sala and is_admin_chat(update.effective_chat.id):
+        # Il report numerico interno resta disponibile soltanto all'admin.
+        # Le domande dei clienti devono arrivare all'AI per ricevere una
+        # risposta completa, anche quando contengono la parola "risultati".
+        risposta = await sala_segnali_risultati(
+            _rileva_periodo_sala(testo),
+            _rileva_simbolo_sala(testo),
+        )
         await record_message(update, "in", testo, "lead")
         await msg.reply_text(risposta)
         await record_message(update, "out", risposta, "ai")
-        return
-    if any(x in testo.lower() for x in ("sala segnali", "sala signal", "signal room")):
-        await simple_reply(update, f"📊 Sala segnali XAU Machine — MANUALE\n\nAccedi da qui:\n{SIGNAL_ROOM_URL}\n\nAccesso gratuito per sole 24 ore dal primo ingresso. Le operazioni vengono pubblicate manualmente: la sala non esegue né copia automaticamente le operazioni.\n\n🤖 Il bot/copy trading, invece, è completamente automatico una volta configurato. Il trading comporta rischi e i risultati passati non garantiscono risultati futuri.")
         return
     if chiede_credenziali_investor_mt5(testo):
         risposta_credenziali = testo_credenziali_investor_mt5()
