@@ -296,7 +296,8 @@ async def crea_richiesta_screenshot(table_row: dict) -> dict | None:
 
 async def attendi_e_invia_screenshot(context: ContextTypes.DEFAULT_TYPE, chat_id: int,
                                       riga_id: str, tentativi_max: int = 20,
-                                      attesa_secondi: float = 3.0) -> None:
+                                      attesa_secondi: float = 3.0,
+                                      business_connection_id: str | None = None) -> None:
     """Fa polling della riga finche' il worker MT5 sulla VPS non la segna
     'fatto' (o 'errore'), poi manda la foto nella stessa chat. Timeout
     totale: ~tentativi_max * attesa_secondi (default 60s)."""
@@ -342,6 +343,7 @@ async def attendi_e_invia_screenshot(context: ContextTypes.DEFAULT_TYPE, chat_id
                     text=("Il terminale MT5 non sta restituendo dati validi del conto. "
                           "Non ti mando uno screenshot vuoto: ho avvisato l'operatore "
                           "per controllare la connessione."),
+                    business_connection_id=business_connection_id,
                 )
                 if ADMIN_CHAT_ID:
                     try:
@@ -356,6 +358,7 @@ async def attendi_e_invia_screenshot(context: ContextTypes.DEFAULT_TYPE, chat_id
                 await context.bot.send_photo(
                     chat_id=chat_id, photo=riga["immagine_url"],
                     caption="📊 Ecco l'andamento del conto reale.",
+                    business_connection_id=business_connection_id,
                 )
             except Exception as exc:
                 log.warning("Invio foto MT5 fallito: %s", exc)
@@ -363,6 +366,7 @@ async def attendi_e_invia_screenshot(context: ContextTypes.DEFAULT_TYPE, chat_id
                     await context.bot.send_message(
                         chat_id=chat_id,
                         text="Ho lo screenshot pronto ma non riesco a mandartelo adesso: riprova tra poco.",
+                        business_connection_id=business_connection_id,
                     )
                 except Exception:
                     pass
@@ -373,6 +377,7 @@ async def attendi_e_invia_screenshot(context: ContextTypes.DEFAULT_TYPE, chat_id
                     chat_id=chat_id,
                     text="Non sono riuscito a recuperare i dati del conto in questo momento. "
                          "Ci riprovo tra poco, oppure scrivi /intervento_umano.",
+                    business_connection_id=business_connection_id,
                 )
             except Exception:
                 pass
@@ -381,6 +386,7 @@ async def attendi_e_invia_screenshot(context: ContextTypes.DEFAULT_TYPE, chat_id
         await context.bot.send_message(
             chat_id=chat_id,
             text="Ci sto mettendo più del previsto a recuperare i dati del conto: appena pronti te li mando qui.",
+            business_connection_id=business_connection_id,
         )
     except Exception:
         pass
@@ -433,7 +439,10 @@ async def richiedi_screenshot_mt5(update: Update, context: ContextTypes.DEFAULT_
     attesa = f"Un attimo, controllo il conto reale {descrizione or ''}… 📊".replace("  ", " ")
     await msg.reply_text(attesa)
     await record_message(update, "out", attesa, "ai")
-    asyncio.create_task(attendi_e_invia_screenshot(context, chat.id, riga["id"]))
+    asyncio.create_task(attendi_e_invia_screenshot(
+        context, chat.id, riga["id"],
+        business_connection_id=getattr(msg, "business_connection_id", None),
+    ))
 
 
 async def get_welcome_message(deep_link_code: str):
@@ -778,15 +787,46 @@ async def forum_operator_message(update: Update, context: ContextTypes.DEFAULT_T
                 chat_id=int(mapping["telegram_chat_id"]),
                 text=body,
                 disable_web_page_preview=True,
+                business_connection_id=mapping.get("business_connection_id"),
             )
             if str(mapping.get("language") or "it") != "it" and not translated:
                 await msg.reply_text("⚠️ Google Translate non disponibile: il messaggio e' stato inviato in italiano.")
         else:
-            await context.bot.copy_message(
-                chat_id=int(mapping["telegram_chat_id"]),
-                from_chat_id=chat.id,
-                message_id=msg.message_id,
-            )
+            business_connection_id = mapping.get("business_connection_id")
+            if business_connection_id and msg.photo:
+                telegram_file = await msg.photo[-1].get_file()
+                payload = bytes(await telegram_file.download_as_bytearray())
+                await context.bot.send_photo(
+                    chat_id=int(mapping["telegram_chat_id"]),
+                    photo=payload,
+                    caption=msg.caption,
+                    business_connection_id=business_connection_id,
+                )
+            elif business_connection_id and msg.video:
+                telegram_file = await msg.video.get_file()
+                payload = bytes(await telegram_file.download_as_bytearray())
+                await context.bot.send_video(
+                    chat_id=int(mapping["telegram_chat_id"]),
+                    video=payload,
+                    caption=msg.caption,
+                    business_connection_id=business_connection_id,
+                )
+            elif business_connection_id and msg.document:
+                telegram_file = await msg.document.get_file()
+                payload = bytes(await telegram_file.download_as_bytearray())
+                await context.bot.send_document(
+                    chat_id=int(mapping["telegram_chat_id"]),
+                    document=payload,
+                    filename=msg.document.file_name,
+                    caption=msg.caption,
+                    business_connection_id=business_connection_id,
+                )
+            else:
+                await context.bot.copy_message(
+                    chat_id=int(mapping["telegram_chat_id"]),
+                    from_chat_id=chat.id,
+                    message_id=msg.message_id,
+                )
             body = msg.caption or "Allegato inviato dall'operatore"
         await crm_record_forum_reply(mapping, body)
         pause = await crm_set_ai_control(int(mapping["telegram_chat_id"]), "pause_1h")
@@ -910,6 +950,33 @@ async def backfill_unmirrored_followups(app) -> None:
         log.warning("Recupero follow-up storici non disponibile: %s", exc)
 
 
+async def crm_business_connection_id(chat_id: int | str) -> str | None:
+    """Recupera la connessione Business persistita per una chat cliente."""
+    try:
+        headers = dict(CRM_HEADERS)
+        headers.pop("Prefer", None)
+        async with httpx.AsyncClient(timeout=8) as client:
+            r = await client.get(
+                f"{SUPABASE_URL}/rest/v1/crm_leads",
+                headers=headers,
+                params={
+                    "telegram_chat_id": f"eq.{chat_id}",
+                    "select": "telegram_business_connection_id",
+                    "order": "updated_at.desc",
+                    "limit": "1",
+                },
+            )
+        if r.status_code < 300:
+            rows = r.json() or []
+            if rows:
+                return rows[0].get("telegram_business_connection_id") or None
+        else:
+            log.warning("Lettura connessione Telegram Business fallita %s", r.status_code)
+    except Exception as exc:
+        log.warning("Connessione Telegram Business non disponibile: %s", exc)
+    return None
+
+
 async def poll_operator_outbox(app) -> None:
     headers = dict(CRM_HEADERS); headers.pop("Prefer", None)
     await asyncio.sleep(3)
@@ -923,7 +990,12 @@ async def poll_operator_outbox(app) -> None:
                 success = False
                 error_text = None
                 try:
-                    await app.bot.send_message(chat_id=row["telegram_chat_id"], text=row["body"])
+                    business_connection_id = await crm_business_connection_id(row["telegram_chat_id"])
+                    await app.bot.send_message(
+                        chat_id=row["telegram_chat_id"],
+                        text=row["body"],
+                        business_connection_id=business_connection_id,
+                    )
                     success = True
                     log.info("Messaggio operatore inviato su Telegram: %s", row.get("id"))
                     await forward_followup_to_topic(app, row)
@@ -1063,6 +1135,7 @@ async def record_message(update: Update, direction="in", body: str | None = None
         "p_direction": direction,
         "p_body": (body or "")[:8000],
         "p_sender_type": sender_type,
+        "p_business_connection_id": getattr(update.effective_message, "business_connection_id", None),
     }
     try:
         headers = dict(CRM_HEADERS)
