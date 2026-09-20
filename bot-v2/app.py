@@ -953,25 +953,10 @@ async def backfill_unmirrored_followups(app) -> None:
 async def crm_business_connection_id(chat_id: int | str) -> str | None:
     """Recupera la connessione Business persistita per una chat cliente."""
     try:
-        headers = dict(CRM_HEADERS)
-        headers.pop("Prefer", None)
-        async with httpx.AsyncClient(timeout=8) as client:
-            r = await client.get(
-                f"{SUPABASE_URL}/rest/v1/crm_leads",
-                headers=headers,
-                params={
-                    "telegram_chat_id": f"eq.{chat_id}",
-                    "select": "telegram_business_connection_id",
-                    "order": "updated_at.desc",
-                    "limit": "1",
-                },
-            )
-        if r.status_code < 300:
-            rows = r.json() or []
-            if rows:
-                return rows[0].get("telegram_business_connection_id") or None
-        else:
-            log.warning("Lettura connessione Telegram Business fallita %s", r.status_code)
+        # Usa la RPC protetta del CRM: la chiave pubblicabile del runtime non
+        # deve leggere direttamente crm_leads, che e' protetta da RLS.
+        mapping = await crm_topic_lookup(telegram_user_id=int(chat_id))
+        return mapping.get("business_connection_id") or None
     except Exception as exc:
         log.warning("Connessione Telegram Business non disponibile: %s", exc)
     return None
