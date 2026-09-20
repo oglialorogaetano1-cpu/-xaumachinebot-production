@@ -1357,6 +1357,14 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     testo = msg.text or ""
     testo_lower = testo.lower()
+    categorie_richieste = (
+        any(x in testo_lower for x in ("come funziona il bot", "bot automatico", "copy trading")),
+        any(x in testo_lower for x in ("rischi", "rischio", "risk")),
+        any(x in testo_lower for x in ("risultati", "risultato", "performance", "storico")),
+        any(x in testo_lower for x in ("screenshot", "screen shot", "mt5", "metatrader")),
+        any(x in testo_lower for x in ("investor", "sola lettura")),
+    )
+    richiesta_composta = sum(categorie_richieste) >= 2
     richiesta_report_sala = (
         any(x in testo_lower for x in ("risultati", "risultato", "quanti tp", "quante tp", "quanti stop", "tp avete preso", "performance", "resoconto"))
         and any(x in testo_lower for x in ("sala segnali", "sala signal", "signal room"))
@@ -1373,7 +1381,7 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text(risposta)
         await record_message(update, "out", risposta, "ai")
         return
-    if chiede_credenziali_investor_mt5(testo):
+    if not richiesta_composta and chiede_credenziali_investor_mt5(testo):
         risposta_credenziali = testo_credenziali_investor_mt5()
         await record_message(update, "in", testo, "lead")
         if risposta_credenziali:
@@ -1397,7 +1405,7 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if periodo_risposta:
             await richiedi_screenshot_mt5(update, context, periodo_risposta, testo)
             return
-    periodo = rileva_richiesta_screenshot(testo)
+    periodo = None if richiesta_composta else rileva_richiesta_screenshot(testo)
     if periodo == PERIODO_DA_CHIEDERE:
         context.user_data["awaiting_mt5_period"] = True
         domanda = "Certo 📊 Ti va bene l'andamento di oggi oppure vuoi un altro periodo, per esempio una settimana, un mese o 4 mesi?"
