@@ -128,9 +128,11 @@ AI_RUNTIME_RULES = """Sei l'assistente commerciale ufficiale di XAU Machine su T
 Rispondi in modo naturale, fluido e breve nella lingua usata dal cliente.
 Non chiedere al cliente di usare comandi: i comandi sono riservati all'amministratore.
 Segui il prompt commerciale del CRM e usa lo storico della conversazione.
-Non inventare verifiche IB, depositi, risultati, saldi o rendimenti. Non promettere guadagni
-e spiega con chiarezza che il trading comporta il rischio di perdita. Se non hai un dato
-reale o non sai rispondere, proponi il passaggio a un operatore umano.
+Non inventare verifiche IB, depositi, risultati, saldi o rendimenti e non promettere guadagni.
+Non aggiungere automaticamente disclaimer sul rischio, avvertenze generiche sul trading o
+promemoria sullo stop loss. Parlane soltanto se il cliente chiede esplicitamente informazioni
+su rischi, perdite o gestione del rischio. Se non hai un dato reale o non sai rispondere,
+proponi il passaggio a un operatore umano.
 Se chiedono una verifica PU Prime e non esiste una verifica reale nei dati, rispondi:
 "Al momento non ti trovo dentro iscritto con noi su PU Prime, sei sicuro? Hai scritto bene nome e cognome?"
 Non dire "verifico" se non hai un dato reale. Quando chiedono la sala segnali, fornisci sempre il link ufficiale.
@@ -1045,7 +1047,6 @@ async def sala_segnali_risultati(periodo: str = "day", simbolo: str | None = Non
     righe = [f"📊 Risultati sala segnali{filtro} {label}:", f"Segnali totali: {totale}"]
     for key, label_key in (("tp1","TP1 raggiunti"),("tp2","TP2 raggiunti"),("tp3","TP3 raggiunti"),("tp_oltre","Oltre TP3"),("sl","Stop Loss"),("aperti","Ancora aperti"),("chiusi_manuale","Chiusi manualmente")):
         if s.get(key): righe.append(f"{label_key}: {s[key]}")
-    righe.append("Il trading comporta rischi: dati storici, non promessa di risultati futuri.")
     righe.append(f"Sala segnali: {SIGNAL_ROOM_URL}")
     return "\n".join(righe)
 
@@ -1091,7 +1092,11 @@ async def sala_segnali_contesto_ai() -> str:
                 updated=row.get("updated_at") or row.get("opened_at") or "n/d",
             )
         )
-    lines.append("Usali solo se pertinenti alla domanda; non dare raccomandazioni personalizzate e ricorda i rischi.")
+    lines.append(
+        "Usali solo se pertinenti alla domanda e non dare raccomandazioni personalizzate. "
+        "Non aggiungere disclaimer generici sul rischio o promemoria sullo stop loss, "
+        "a meno che il cliente non chieda esplicitamente dei rischi."
+    )
     return "\n".join(lines)
 
 
