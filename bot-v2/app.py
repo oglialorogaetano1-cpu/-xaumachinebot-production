@@ -702,11 +702,15 @@ async def ensure_customer_topic(update: Update) -> int | None:
 
 async def mirror_text_to_forum(update: Update, direction: str, body: str,
                                sender_type: str | None = None) -> None:
-    """Specchia nel Topic i testi privati del cliente e dell'assistente."""
+    """Specchia nel Topic soltanto le chat dell'account Telegram Business."""
     forum_chat_id = support_forum_chat_id()
     if not forum_chat_id or not body or not update.effective_chat:
         return
     if update.effective_chat.type != "private":
+        return
+    if update.effective_user and update.effective_user.is_bot:
+        return
+    if not getattr(update.effective_message, "business_connection_id", None):
         return
     thread_id = await ensure_customer_topic(update)
     if not thread_id:
@@ -985,7 +989,10 @@ async def poll_operator_outbox(app) -> None:
                     )
                     success = True
                     log.info("Messaggio operatore inviato su Telegram: %s", row.get("id"))
-                    await forward_followup_to_topic(app, row)
+                    # Nel gruppo di supporto mostriamo soltanto le chat gestite
+                    # tramite l'account Telegram Business, non tutto l'outbox CRM.
+                    if business_connection_id:
+                        await forward_followup_to_topic(app, row)
                 except Exception as exc:
                     error_text = str(exc)
                     log.warning("Invio messaggio operatore %s fallito: %s", row.get("id"), exc)
@@ -1418,6 +1425,11 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     if msg is None or not update.effective_chat:
         return
+    # Un bot che scrive all'account Business non e' un lead: rispondergli
+    # creerebbe un loop bot-to-bot e centinaia di messaggi inutili nel CRM.
+    if update.effective_user and update.effective_user.is_bot:
+        log.info("Messaggio Telegram ignorato da account bot: @%s", update.effective_user.username or update.effective_user.id)
+        return
     testo = msg.text or ""
     testo_lower = testo.lower()
     categorie_richieste = (
@@ -1764,7 +1776,6 @@ async def post_init(app):
         ACTIVE_SUPPORT_FORUM_CHAT_ID = configured_forum
     log.info("Telegram support Forum configured: %s", bool(support_forum_chat_id()))
     app.create_task(poll_operator_outbox(app), name="crm-operator-outbox")
-    app.create_task(backfill_unmirrored_followups(app), name="crm-topic-backfill")
     app.create_task(poll_signal_room_expirations(app), name="signal-room-24h-enforcement")
     log.info("Signal room 24h enforcement enabled for %s", SIGNAL_ROOM_URL)
 
