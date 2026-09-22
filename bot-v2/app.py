@@ -1775,6 +1775,13 @@ async def post_init(app):
     if configured_forum:
         ACTIVE_SUPPORT_FORUM_CHAT_ID = configured_forum
     log.info("Telegram support Forum configured: %s", bool(support_forum_chat_id()))
+    # Pulizia una tantum confermata dall'amministratore: Topic creato dal
+    # loop con @leo_trading_bot. Questa chiamata viene rimossa dopo il deploy.
+    await app.bot.delete_forum_topic(
+        chat_id=int(support_forum_chat_id()),
+        message_thread_id=803,
+    )
+    log.info("Topic Telegram indesiderato eliminato: thread 803")
     app.create_task(poll_operator_outbox(app), name="crm-operator-outbox")
     app.create_task(poll_signal_room_expirations(app), name="signal-room-24h-enforcement")
     log.info("Signal room 24h enforcement enabled for %s", SIGNAL_ROOM_URL)
