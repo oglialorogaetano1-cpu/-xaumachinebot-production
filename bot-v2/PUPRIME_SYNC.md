@@ -61,7 +61,12 @@ provide rebate/commission values, full historical customer lists, or documented
 KYC/account-type enum labels. Those values are not fabricated or overwritten.
 `rebate_available=false` records that limitation. Completing rebate synchronization
 requires adding rebate data to the upstream API contract and testing its mapping.
-The CRM UI is unchanged; transaction detail remains in the private snapshots.
+Transaction detail remains in the private snapshots. The recovered frontend in
+`crm-frontend` now reads `crm_puprime_rebate_summary`: today's earned commission,
+month-to-date earnings and withdrawable balance are separate, including per-IB
+rows. Missing reports display an em dash, never an invented zero. Daily earnings
+are keyed by report date; lead update timestamps are not used. The new earnings
+tables remain empty until the upstream commission contract is verified.
 
 ## Verification and operation
 
@@ -73,7 +78,14 @@ unique account/date constraints, and the new `crm_sync_runs` entries.
 Never print variable values, API responses, customer rows or exception bodies.
 
 Observe Railway deployment terminal `SUCCESS`, then `PUPRIME_SYNC_ENABLED` and
-`PUPRIME_SYNC_SUCCESS` logs and a successful database run. A healthy Telegram
+the database run. Hourly unhealthy runs emit ERROR `PUPRIME_HEALTH_ERROR` with
+`code=rebate_unavailable` or `code=sync_failed`. Recognizable Cloudflare/CAPTCHA
+responses have `category=upstream_verification_required`; opaque upstream failures
+still produce `sync_failed`. Bodies, URLs and tokens are never logged. Healthy
+runs emit no periodic success log. `crm_sync_runs.details.rebate_available=false`
+also makes missing commissions queryable even when customer imports succeed.
+These are monitoring signals, not configured email/Telegram notifications.
+A healthy Telegram
 process alone does not prove the import succeeded. Check failure authentication
 with an invalid runtime secret and verify no records changed.
 
@@ -82,7 +94,7 @@ schema can remain unused; rollback never deletes existing CRM data.
 
 ## Current validation state
 
-Nine local tests pass. After explicit authorization, the production migration was
+Twelve sync tests and six frontend tests pass. After explicit authorization, the production migration was
 applied. Replaying a real report imported 46 accounts and 36 funding days; a
 repeat run was idempotent and an invalid runtime secret was rejected. Railway
 variables are configured for 3600 seconds. Deployment

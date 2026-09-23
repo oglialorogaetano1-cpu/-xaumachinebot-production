@@ -61,6 +61,21 @@ class NormalizeTests(unittest.TestCase):
 
 
 class RuntimeTests(unittest.IsolatedAsyncioTestCase):
+    def test_health_is_silent_when_complete(self):
+        with self.assertNoLogs("puprime-sync", level="INFO"):
+            sync.report_health("test-run", True)
+
+    def test_missing_rebate_is_monitorable(self):
+        with self.assertLogs("puprime-sync", level="ERROR") as logs:
+            sync.report_health("test-run", False)
+        self.assertIn("code=rebate_unavailable", logs.output[0])
+
+    def test_cloudflare_classifier_does_not_expose_body(self):
+        response=httpx.Response(503,text="Cloudflare captcha sensitive",request=httpx.Request("GET","https://example.test"))
+        with self.assertRaises(httpx.HTTPStatusError) as caught:
+            response.raise_for_status()
+        self.assertEqual(sync.failure_category(caught.exception),"upstream_verification_required")
+
     async def test_failure_logs_do_not_leak_body_or_url(self):
         with patch.dict("os.environ",{"PUPRIME_API_URL":"https://example.test/ib-data", "PUPRIME_API_TOKEN":"test-secret",
              "SUPABASE_URL":"https://example.test", "SUPABASE_KEY":"test-key","CRM_TRACKING_SECRET":"test-secret"}):

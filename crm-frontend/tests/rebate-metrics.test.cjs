@@ -1,0 +1,10 @@
+const assert=require('node:assert/strict');
+const test=require('node:test');
+const m=require('../crm/rebate-metrics.js');
+const now=new Date('2026-09-23T22:30:00Z');
+test('uses Rome calendar day, including UTC midnight boundary',()=>assert.equal(m.day(now),'2026-09-24'));
+test('missing reports are unavailable, not zero',()=>{const v=m.view(null,now);assert.equal(v.daily,null);assert.equal(v.monthly,null);assert.equal(m.money(v.daily),'—');});
+test('verified zero remains a real amount',()=>{const v=m.view({day:'2026-09-24',daily:0,monthly:12,available_balance:99,ibs:[]},now);assert.equal(v.daily,0);assert.notEqual(m.money(v.daily),'—');});
+test('daily, monthly and balance are separate',()=>{const v=m.view({day:'2026-09-24',daily:.27,monthly:10,available_balance:29.35,ibs:[{affiliate_id:'23217421',daily:.27,monthly:10,available_balance:29.35}]},now);assert.equal(v.daily,.27);assert.equal(v.monthly,10);assert.equal(v.balance,29.35);assert.equal(v.rows[1].balance,29.35);});
+test('yesterdays report cannot be shown as todays earnings',()=>{const v=m.view({day:'2026-09-23',daily:12,monthly:30,available_balance:50,ibs:[]},now);assert.equal(v.daily,null);assert.equal(v.monthly,null);assert.equal(v.balance,50);});
+test('unrelated lead modification dates cannot change earnings',()=>{const s={day:'2026-09-24',daily:1,monthly:2,available_balance:3,ibs:[]};assert.deepEqual(m.view(s,now),m.view({...s,leads:[{rebate_total:99999,updated_at:now.toISOString()}]},now));});

@@ -14,6 +14,20 @@ log = logging.getLogger("puprime-sync")
 IBS = ("7527073", "23217421")
 
 
+def failure_category(exc):
+    if isinstance(exc, httpx.HTTPStatusError):
+        # Inspect only for a fixed classifier; never emit upstream body or URL.
+        body = exc.response.text[:16000].lower()
+        if any(marker in body for marker in ("cloudflare", "cf-chl-", "just a moment", "captcha")):
+            return "upstream_verification_required"
+    return type(exc).__name__
+
+
+def report_health(run_id, rebate_available):
+    if not rebate_available:
+        log.error("PUPRIME_HEALTH_ERROR run=%s code=rebate_unavailable ibs=%s", run_id, ",".join(IBS))
+
+
 def number(value):
     try:
         result = Decimal(str(value))
@@ -126,13 +140,13 @@ class Sync:
                     response.raise_for_status()
                     normalized = normalize(response.json())
                     result = await self.rpc(client, {**normalized, "run_id": run_id, "started_at": started, "status": "success"})
-                    log.info("PUPRIME_SYNC_SUCCESS run=%s clients=%s days=%s rebate_available=false", run_id, result["clients"], result["days"])
+                    report_health(run_id, normalized["rebate_available"])
                     return result
                 except Exception as exc:
                     # Exception strings and HTTP bodies may include tokens/PII.
-                    error = type(exc).__name__
+                    error = failure_category(exc)
                     status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
-                    log.warning("PUPRIME_SYNC_FAILED run=%s category=%s http_status=%s", run_id, error, status)
+                    log.error("PUPRIME_HEALTH_ERROR run=%s code=sync_failed category=%s http_status=%s", run_id, error, status)
                     with contextlib.suppress(Exception):
                         await self.rpc(client, {"run_id": run_id, "started_at": started, "status": "failed", "error_category": error, "http_status": status})
                     raise RuntimeError("puprime_sync_failed") from None
