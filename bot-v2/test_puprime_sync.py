@@ -1,0 +1,80 @@
+import copy
+import unittest
+from unittest.mock import patch
+import httpx
+import puprime_sync as sync
+
+
+def report(account):
+    return {"openedAccounts": 1, "openedAccountsDetail": [
+        {"mt4Account": account, "name": "Test", "userId": account+100, "balance": 0, "email": None}],
+        "funding": [{"mt4Account": account,"date": "2026-09-23","deposit": 10,"withdraw": 2}],
+        "deposits": [{"mt4Account": account,"updateTime": "2026-09-23","amount": 10,"currency":"EUR"}],
+        "withdraws": [], "totalDeposit": 10, "totalWithdraw": 2}
+
+
+def payload():
+    r = {"ibReports": {"7527073":report(1),"23217421":report(2)}}
+    r.update(report(1))  # Legacy primary report must NOT be counted twice.
+    return r
+
+
+class NormalizeTests(unittest.TestCase):
+    def test_combines_both_ibs_once(self):
+        r = sync.normalize(payload())
+        self.assertEqual(len(r["clients"]),2)
+        self.assertEqual(r["daily"][0]["depositi_usd"],"20")
+        self.assertEqual(r["daily"][0]["depositi_netti_usd"],"16")
+
+    def test_sparse_fields_zero_balance_no_invented_rebate(self):
+        c=sync.normalize(payload())["clients"][0]
+        self.assertEqual(c["saldo"],"0")
+        for key in ("email","rebate","stato_id","tipo_conto","primo_deposito_data","data_registrazione"):
+            self.assertNotIn(key,c)
+
+    def test_incomplete_or_error_reports_rejected(self):
+        for mutate in (lambda r:r.pop("23217421"),lambda r:r["23217421"].update(error="private text"),
+                       lambda r:r["23217421"].update(openedAccounts=2),lambda r:r["23217421"].update(totalDeposit=100)):
+            p=payload(); mutate(p["ibReports"])
+            with self.assertRaises(ValueError): sync.normalize(p)
+
+    def test_missing_or_ambiguous_account_rejected(self):
+        for acct in (None,1):
+            p=payload(); p["ibReports"]["23217421"]["openedAccountsDetail"][0]["mt4Account"]=acct
+            with self.assertRaises(ValueError): sync.normalize(p)
+
+    def test_latest_deposit_sorted(self):
+        p=payload(); r=p["ibReports"]["7527073"]
+        old=copy.deepcopy(r["deposits"][0]);old.update(updateTime="2026-08-01",amount=5)
+        r["deposits"].append(old)
+        self.assertEqual(sync.normalize(p)["clients"][0]["ultimo_deposito_importo"],"10")
+
+    def test_all_movements_retained_in_snapshot(self):
+        p=payload(); self.assertEqual(sync.normalize(p)["reports"],p["ibReports"])
+
+    def test_invalid_money_rejected(self):
+        for value in (None,"NaN","Infinity","oops"):
+            with self.assertRaises(ValueError): sync.number(value)
+
+    def test_repeat_normalization_identical(self):
+        self.assertEqual(sync.normalize(payload()),sync.normalize(payload()))
+
+
+class RuntimeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_failure_logs_do_not_leak_body_or_url(self):
+        with patch.dict("os.environ",{"PUPRIME_API_URL":"https://example.test/ib-data", "PUPRIME_API_TOKEN":"test-secret",
+             "SUPABASE_URL":"https://example.test", "SUPABASE_KEY":"test-key","CRM_TRACKING_SECRET":"test-secret"}):
+            worker=sync.Sync()
+        calls=[]
+        async def handler(request):
+            calls.append(request)
+            return httpx.Response(500, text="sensitive upstream body") if request.method=="GET" else httpx.Response(200,json={})
+        real_client=httpx.AsyncClient
+        with patch.object(sync.httpx,"AsyncClient",lambda **kw:real_client(transport=httpx.MockTransport(handler),**kw)):
+            with self.assertLogs("puprime-sync",level="WARNING") as logs:
+                with self.assertRaisesRegex(RuntimeError,"puprime_sync_failed"):await worker.once()
+        self.assertEqual(len(calls),2)
+        self.assertNotIn("sensitive",str(logs.output)); self.assertNotIn("test-secret",str(logs.output))
+
+
+if __name__=="__main__": unittest.main()

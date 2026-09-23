@@ -7,6 +7,7 @@ import threading
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import httpx
+import puprime_sync
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
@@ -1291,10 +1292,17 @@ async def post_init(app):
         ACTIVE_SUPPORT_FORUM_CHAT_ID = configured_forum
     log.info("Telegram support Forum configured: %s", bool(support_forum_chat_id()))
     app.create_task(poll_operator_outbox(app), name="crm-operator-outbox")
+    app.bot_data["puprime_sync_task"] = puprime_sync.start()
+
+async def post_stop(app):
+    task = app.bot_data.get("puprime_sync_task")
+    if task:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 def main():
     threading.Thread(target=start_health_server, daemon=True, name="health-server").start()
-    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+    app = Application.builder().token(BOT_TOKEN).post_init(post_init).post_stop(post_stop).build()
     app.add_error_handler(on_error)
     for cmd, fn in {"start":start,"help":help_cmd,"registrazione":registration,"sala_segnali":signals,"verifica_ib":verify_ib,"deposito":deposit,"guida_bot":guide,"screenshot":screenshot,"intervento_umano":human,"attiva_supporto":activate_support_forum}.items():
         app.add_handler(CommandHandler(cmd, fn))
