@@ -84,7 +84,7 @@ responses have `category=upstream_verification_required`; opaque upstream failur
 still produce `sync_failed`. Bodies, URLs and tokens are never logged. Healthy
 runs emit no periodic success log. `crm_sync_runs.details.rebate_available=false`
 also makes missing commissions queryable even when customer imports succeed.
-These are monitoring signals, not configured email/Telegram notifications.
+Telegram problem notifications are configured as described below.
 A healthy Telegram
 process alone does not prove the import succeeded. Check failure authentication
 with an invalid runtime secret and verify no records changed.
@@ -94,7 +94,7 @@ schema can remain unused; rollback never deletes existing CRM data.
 
 ## Current validation state
 
-Twelve sync tests and six frontend tests pass. After explicit authorization, the production migration was
+Fifteen sync tests and six frontend tests pass. After explicit authorization, the production migration was
 applied. Replaying a real report imported 46 accounts and 36 funding days; a
 repeat run was idempotent and an invalid runtime secret was rejected. Railway
 variables are configured for 3600 seconds. Deployment
