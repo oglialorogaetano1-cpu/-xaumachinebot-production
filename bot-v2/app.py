@@ -7,6 +7,8 @@ import threading
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import httpx
+import puprime_sync
+import signal_room_policy
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, ChatJoinRequestHandler, ChatMemberHandler, CommandHandler, MessageHandler, ContextTypes, filters
 
@@ -32,6 +34,7 @@ MT5_INVESTOR_PASSWORD = os.environ.get("MT5_INVESTOR_PASSWORD", "")
 GOOGLE_TRANSLATE_API_KEY = os.environ.get("GOOGLE_TRANSLATE_API_KEY", "").strip()
 SIGNAL_ROOM_URL = "https://t.me/+-e1_tDFps0Q2YmE0"
 SIGNAL_ROOM_SOURCE = "signal_room_24h"
+SIGNAL_ROOM_CHAT_ID = os.environ.get("SIGNAL_ROOM_CHAT_ID", "").strip()
 SIGNAL_ROOM_WELCOME_MESSAGE = (
     "👋 Benvenuto nella sala segnali XAU Machine.\n\n"
     "Il tuo accesso gratuito dura 24 ore. Per restare nella sala dopo la prova, "
@@ -1601,8 +1604,8 @@ async def signal_room_member_update(update: Update, context: ContextTypes.DEFAUL
     new_status = member_update.new_chat_member.status
     user = member_update.new_chat_member.user
     invite_link = member_update.invite_link.invite_link if member_update.invite_link else ""
-    joined = old_status in ("left", "kicked") and new_status in ("member", "administrator", "creator")
-    if not joined or user.is_bot or invite_link != SIGNAL_ROOM_URL:
+    joined = signal_room_policy.joined_member(member_update.old_chat_member, member_update.new_chat_member)
+    if not joined or user.is_bot or new_status in ("administrator", "creator") or not signal_room_policy.is_signal_room(member_update.chat.id, SIGNAL_ROOM_CHAT_ID, invite_link, SIGNAL_ROOM_URL):
         return
     await crm_track_signal_room_member(member_update)
 
@@ -1650,15 +1653,17 @@ async def poll_signal_room_expirations(app: Application) -> None:
                 chat_id = int(item["channel_chat_id"])
                 user_id = int(item["telegram_user_id"])
                 try:
-                    await app.bot.ban_chat_member(chat_id=chat_id, user_id=user_id)
-                    try:
-                        await app.bot.unban_chat_member(
-                            chat_id=chat_id,
-                            user_id=user_id,
-                            only_if_banned=True,
-                        )
-                    except Exception as unban_exc:
-                        log.warning("Utente rimosso ma non sbloccato per il rientro %s: %s", user_id, unban_exc)
+                    if SIGNAL_ROOM_CHAT_ID and str(chat_id) != SIGNAL_ROOM_CHAT_ID:
+                        continue
+                    async with httpx.AsyncClient(timeout=12) as client:
+                        check = await client.post(
+                            f"{SUPABASE_URL}/rest/v1/rpc/crm_signal_room_removal_allowed",
+                            headers=headers, json={"p_secret": CRM_TRACKING_SECRET, "p_event_id": event_id})
+                        check.raise_for_status()
+                        if check.json() is not True:
+                            continue
+                    if not await signal_room_policy.remove_member(app.bot, chat_id, user_id):
+                        continue
                     await record_signal_room_moderation(event_id, True)
                     log.info("Accesso sala segnali scaduto: utente %s rimosso da %s", user_id, chat_id)
                     if ADMIN_CHAT_ID:
@@ -1693,6 +1698,8 @@ async def channel_join_request(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     used_link = request.invite_link.invite_link if request.invite_link else ""
     campaign = CHANNEL_JOIN_CAMPAIGNS.get(used_link)
+    if SIGNAL_ROOM_CHAT_ID and str(request.chat.id) == SIGNAL_ROOM_CHAT_ID:
+        campaign = CHANNEL_JOIN_CAMPAIGNS[SIGNAL_ROOM_URL]
     if not campaign:
         return
 
@@ -1778,10 +1785,17 @@ async def post_init(app):
     app.create_task(poll_operator_outbox(app), name="crm-operator-outbox")
     app.create_task(poll_signal_room_expirations(app), name="signal-room-24h-enforcement")
     log.info("Signal room 24h enforcement enabled for %s", SIGNAL_ROOM_URL)
+    app.bot_data["puprime_sync_task"] = puprime_sync.start(app.bot, ADMIN_CHAT_ID.strip() or support_forum_chat_id())
+
+async def post_stop(app):
+    task = app.bot_data.get("puprime_sync_task")
+    if task:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 def main():
     threading.Thread(target=start_health_server, daemon=True, name="health-server").start()
-    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+    app = Application.builder().token(BOT_TOKEN).post_init(post_init).post_stop(post_stop).build()
     app.add_error_handler(on_error)
     for cmd, fn in {"start":start,"help":help_cmd,"registrazione":registration,"sala_segnali":signals,"verifica_ib":verify_ib,"deposito":deposit,"guida_bot":guide,"screenshot":screenshot,"intervento_umano":human,"attiva_supporto":activate_support_forum,"statistiche_canale":channel_stats}.items():
         app.add_handler(CommandHandler(cmd, fn))
