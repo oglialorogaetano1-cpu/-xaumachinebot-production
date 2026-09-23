@@ -14,9 +14,8 @@ a Railway cron schedule on this bot: cron expects the process to exit.
 - Supabase: `vtssggkdfwuglmqsyxuo`
 - IBs: `7527073`, `23217421`
 
-The implementation includes main revision `41a7e89`, confirmed in the previous
-deployment metadata. The source configuration referenced an older commit; deployment
-metadata was used to preserve the currently active Telegram functionality.
+The implementation preserves the Telegram functionality from main revision
+`41a7e89`, confirmed in the previous deployment metadata.
 
 ## Required Railway variables
 
@@ -86,4 +85,10 @@ schema can remain unused; rollback never deletes existing CRM data.
 Nine local tests pass. After explicit authorization, the production migration was
 applied. Replaying a real report imported 46 accounts and 36 funding days; a
 repeat run was idempotent and an invalid runtime secret was rejected. Railway
-variables are configured for 3600 seconds. Fresh upstream verification continues.
+variables are configured for 3600 seconds. Deployment
+`f691cd74-3ca9-4f78-8ae8-b3376fef1b75` reached SUCCESS. A fresh automatic import
+on 2026-09-23 at 22:39 UTC updated 46 accounts and 36 funding days for both IBs
+(run `30b8b1d2-2864-4656-aa47-3790521e22f8`), verified in runtime logs and Supabase.
+An earlier local API request timed out; failure recording preserved the database.
+The security advisor reports the intentionally policy-free private snapshot table
+(RLS denies direct access); no new public SECURITY DEFINER function was introduced.
