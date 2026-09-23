@@ -1,6 +1,6 @@
 import copy
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, AsyncMock
 import httpx
 import puprime_sync as sync
 
@@ -75,6 +75,37 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(httpx.HTTPStatusError) as caught:
             response.raise_for_status()
         self.assertEqual(sync.failure_category(caught.exception),"upstream_verification_required")
+
+    async def test_alert_send_ack_and_dedup(self):
+        worker=object.__new__(sync.Sync)
+        worker.bot=AsyncMock();worker.alert_chat_id="test-owner"
+        worker.alert_rpc=AsyncMock(side_effect=[{"notify":True,"claim_id":"claim"},{}, {"notify":False}])
+        await worker.notify_health(None,"rebate_unavailable")
+        await worker.notify_health(None,"rebate_unavailable")
+        worker.bot.send_message.assert_awaited_once()
+        self.assertEqual(worker.alert_rpc.await_args_list[1].kwargs,{"p_claim":"claim","p_delivered":True})
+
+    async def test_delivery_failure_releases_claim(self):
+        worker=object.__new__(sync.Sync)
+        worker.bot=AsyncMock();worker.bot.send_message.side_effect=RuntimeError("secret")
+        worker.alert_chat_id="test-owner"
+        worker.alert_rpc=AsyncMock(side_effect=[{"notify":True,"claim_id":"claim"},{}])
+        with self.assertLogs("puprime-sync",level="ERROR") as logs:
+            await worker.notify_health(None,"sync_failed")
+        self.assertNotIn("secret",str(logs.output))
+        self.assertFalse(worker.alert_rpc.await_args.kwargs["p_delivered"])
+
+    async def test_healthy_never_sends_and_db_failure_is_throttled(self):
+        worker=object.__new__(sync.Sync)
+        worker.bot=AsyncMock();worker.alert_chat_id="test-owner";worker.fallback_alert_at=0
+        worker.alert_rpc=AsyncMock(side_effect=RuntimeError())
+        with self.assertLogs("puprime-sync",level="ERROR"):
+            await worker.notify_health(None,"healthy")
+            await worker.notify_health(None,"rebate_unavailable")
+            worker.bot.send_message.assert_not_awaited()
+            await worker.notify_health(None,"sync_failed")
+            await worker.notify_health(None,"sync_failed")
+        worker.bot.send_message.assert_awaited_once()
 
     async def test_failure_logs_do_not_leak_body_or_url(self):
         with patch.dict("os.environ",{"PUPRIME_API_URL":"https://example.test/ib-data", "PUPRIME_API_TOKEN":"test-secret",

@@ -1779,7 +1779,7 @@ async def post_init(app):
     app.create_task(poll_operator_outbox(app), name="crm-operator-outbox")
     app.create_task(poll_signal_room_expirations(app), name="signal-room-24h-enforcement")
     log.info("Signal room 24h enforcement enabled for %s", SIGNAL_ROOM_URL)
-    app.bot_data["puprime_sync_task"] = puprime_sync.start()
+    app.bot_data["puprime_sync_task"] = puprime_sync.start(app.bot, ADMIN_CHAT_ID.strip() or support_forum_chat_id())
 
 async def post_stop(app):
     task = app.bot_data.get("puprime_sync_task")

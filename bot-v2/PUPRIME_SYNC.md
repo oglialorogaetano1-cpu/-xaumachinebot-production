@@ -104,3 +104,17 @@ on 2026-09-23 at 22:39 UTC updated 46 accounts and 36 funding days for both IBs
 An earlier local API request timed out; failure recording preserved the database.
 The security advisor reports the intentionally policy-free private snapshot table
 (RLS denies direct access); no new public SECURITY DEFINER function was introduced.
+
+## Telegram problem notifications
+
+The app passes its existing Telegram bot and configured ADMIN_CHAT_ID (fallback:
+active support forum) to the monitor. Failed sync/verification errors notify on
+first observation; missing rebates must persist at least 45 minutes across
+observations. Healthy runs send nothing. A secret-authenticated private Supabase
+state row atomically claims delivery; successful messages suppress further alerts
+for 24 hours across restarts. Failed Telegram sends release the claim for retry.
+An unacknowledged claim expires after 10 minutes (delivery cannot be exactly-once
+across Telegram and Postgres). During database outages, sync-failure alerts use a
+24-hour in-memory fallback; this fallback does not survive process restarts.
+The migration seeds a missing-rebate incident only from recent recorded runs.
+Logs expose only alert code and delivery status, never recipients or credentials.

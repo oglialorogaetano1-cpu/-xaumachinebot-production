@@ -112,7 +112,10 @@ def normalize(payload):
 
 
 class Sync:
-    def __init__(self):
+    def __init__(self, bot=None, alert_chat_id=None):
+        self.bot = bot
+        self.alert_chat_id = alert_chat_id
+        self.fallback_alert_at = 0
         self.url = os.environ["PUPRIME_API_URL"]
         self.token = os.environ["PUPRIME_API_TOKEN"]
         self.db = os.environ["SUPABASE_URL"].rstrip("/")
@@ -122,6 +125,47 @@ class Sync:
         if self.interval < 300:
             raise ValueError("sync_interval_too_short")
         self.lock = asyncio.Lock()
+
+    async def alert_rpc(self, client, code, **fields):
+        response = await client.post(self.db + "/rest/v1/rpc/crm_puprime_alert",
+            headers={"apikey": self.key}, json={"p_secret": self.secret, "p_code": code, **fields})
+        response.raise_for_status()
+        return response.json()
+
+    async def notify_health(self, client, code):
+        if not self.bot or not self.alert_chat_id:
+            return
+        claim = None
+        try:
+            state = await self.alert_rpc(client, code)
+            if not state.get("notify"):
+                return
+            claim = state["claim_id"]
+        except Exception:
+            log.error("PUPRIME_ALERT_STATE_UNAVAILABLE")
+            # During a DB outage still notify about failed syncs, at most daily
+            # within this process. Durable dedup resumes when DB recovers.
+            if code in ("healthy", "rebate_unavailable") or time.time()-self.fallback_alert_at < 86400:
+                return
+            self.fallback_alert_at = time.time()
+        messages = {
+            "rebate_unavailable": "I report delle commissioni restano non disponibili. I rebate nel CRM non sono aggiornati; controllare accesso e report PuPrime.",
+            "sync_failed": "La sincronizzazione PuPrime è fallita. I dati CRM potrebbero non essere aggiornati. Controllare i log Railway.",
+            "upstream_verification_required": "PuPrime richiede una verifica Cloudflare/CAPTCHA. Ripristinare l'accesso nel browser dedicato della VPS.",
+        }
+        delivered = False
+        try:
+            await self.bot.send_message(chat_id=self.alert_chat_id,
+                text="⚠️ Monitor PuPrime\n"+messages[code]+"\nIB: "+", ".join(IBS)+"\nAvvisi deduplicati per 24 ore.")
+            delivered = True
+            log.info("PUPRIME_ALERT_SENT code=%s", code)
+        except Exception:
+            log.error("PUPRIME_ALERT_DELIVERY_FAILED code=%s", code)
+        if claim:
+            try:
+                await self.alert_rpc(client, code, p_claim=claim, p_delivered=delivered)
+            except Exception:
+                log.error("PUPRIME_ALERT_ACK_FAILED")
 
     async def rpc(self, client, payload):
         response = await client.post(self.db + "/rest/v1/rpc/crm_sync_puprime_api",
@@ -141,6 +185,7 @@ class Sync:
                     normalized = normalize(response.json())
                     result = await self.rpc(client, {**normalized, "run_id": run_id, "started_at": started, "status": "success"})
                     report_health(run_id, normalized["rebate_available"])
+                    await self.notify_health(client, "healthy" if normalized["rebate_available"] else "rebate_unavailable")
                     return result
                 except Exception as exc:
                     # Exception strings and HTTP bodies may include tokens/PII.
@@ -149,6 +194,7 @@ class Sync:
                     log.error("PUPRIME_HEALTH_ERROR run=%s code=sync_failed category=%s http_status=%s", run_id, error, status)
                     with contextlib.suppress(Exception):
                         await self.rpc(client, {"run_id": run_id, "started_at": started, "status": "failed", "error_category": error, "http_status": status})
+                    await self.notify_health(client, "upstream_verification_required" if error == "upstream_verification_required" else "sync_failed")
                     raise RuntimeError("puprime_sync_failed") from None
 
     async def loop(self):
@@ -160,10 +206,10 @@ class Sync:
             await asyncio.sleep(self.interval - time.time() % self.interval)
 
 
-def start():
+def start(bot=None, alert_chat_id=None):
     if os.environ.get("PUPRIME_SYNC_ENABLED", "false").lower() != "true":
         return None
-    return asyncio.create_task(Sync().loop(), name="puprime-hourly-sync")
+    return asyncio.create_task(Sync(bot, alert_chat_id).loop(), name="puprime-hourly-sync")
 
 
 if __name__ == "__main__":
