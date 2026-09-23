@@ -4,6 +4,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY app.py .
 COPY puprime_sync.py .
+COPY signal_room_policy.py .
 COPY health_server.py .
 EXPOSE 8080
 CMD ["sh", "-c", "python -u health_server.py & exec python -u app.py"]
