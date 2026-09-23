@@ -14,8 +14,9 @@ a Railway cron schedule on this bot: cron expects the process to exit.
 - Supabase: `vtssggkdfwuglmqsyxuo`
 - IBs: `7527073`, `23217421`
 
-This branch starts from the deployed revision `235e56c8c9693dff98febe41fe1df2377ed32c64`.
-Main contains additional bot changes; deploying main would include those changes.
+The implementation includes main revision `41a7e89`, confirmed in the previous
+deployment metadata. The source configuration referenced an older commit; deployment
+metadata was used to preserve the currently active Telegram functionality.
 
 ## Required Railway variables
 
@@ -82,7 +83,7 @@ schema can remain unused; rollback never deletes existing CRM data.
 
 ## Current validation state
 
-Nine local tests pass. Production migration was rejected by automatic approval
-review pending explicit authorization for the schema/function/grant changes.
-The migration, database idempotency test, Railway variables and deployment have
-not been applied. No production import has run from this implementation.
+Nine local tests pass. After explicit authorization, the production migration was
+applied. Replaying a real report imported 46 accounts and 36 funding days; a
+repeat run was idempotent and an invalid runtime secret was rejected. Railway
+variables are configured for 3600 seconds. Fresh upstream verification continues.

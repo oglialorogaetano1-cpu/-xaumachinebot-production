@@ -8,8 +8,8 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import httpx
 import puprime_sync
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import Application, ChatJoinRequestHandler, ChatMemberHandler, CommandHandler, MessageHandler, ContextTypes, filters
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("xau-bot-v2")
@@ -32,6 +32,70 @@ MT5_INVESTOR_LOGIN = os.environ.get("MT5_INVESTOR_LOGIN", "")
 MT5_INVESTOR_PASSWORD = os.environ.get("MT5_INVESTOR_PASSWORD", "")
 GOOGLE_TRANSLATE_API_KEY = os.environ.get("GOOGLE_TRANSLATE_API_KEY", "").strip()
 SIGNAL_ROOM_URL = "https://t.me/+-e1_tDFps0Q2YmE0"
+SIGNAL_ROOM_SOURCE = "signal_room_24h"
+SIGNAL_ROOM_WELCOME_MESSAGE = (
+    "👋 Benvenuto nella sala segnali XAU Machine.\n\n"
+    "Il tuo accesso gratuito dura 24 ore. Per restare nella sala dopo la prova, "
+    "avvia il bot e inviaci nome e cognome: controlleremo automaticamente che il "
+    "conto PU Prime sia realmente registrato sotto il nostro IB.\n\n"
+    "Una semplice conferma scritta non è sufficiente: la verifica viene effettuata "
+    "direttamente nel CRM PU Prime."
+)
+LEOTRADING_INVITE_LINK = os.environ.get(
+    "LEOTRADING_INVITE_LINK", "https://t.me/+G8e61TgHAl5lNDQ0"
+).strip()
+LEOTRADING_SOURCE = "tg_en_leotrading"
+LEOTRADING_WELCOME_MESSAGE = (
+    "Welcome to LeoTrading 👋\n\n"
+    "Your request to join the private channel has been received and your access is being approved.\n\n"
+    "Would you like to activate the automated XAU Machine setup? Reply here and I’ll guide you step by step. "
+    "Before activation, we verify that your PU Prime account is correctly linked to our IB; a written confirmation alone is not enough.\n\n"
+    "Trading involves risk of loss."
+)
+ALICE_INVITE_LINK = "https://t.me/+jYBiDAXeGB40MWNk"
+ALICE_SOURCE = "tg_it_alice"
+ALICE_WELCOME_MESSAGE = (
+    "🤖 Ciao! 👋 Sono l’assistente automatico di Alice Trading. Rispondo subito, "
+    "ma sono sempre supervisionato dal nostro staff umano 😎\n\n"
+    "Siamo specializzati in bot automatici per il trading e preferiamo mostrarti qualcosa "
+    "di concreto prima di chiederti di decidere.\n\n"
+    "Puoi controllare personalmente il nostro conto reale su MetaTrader 5 tramite un accesso "
+    "Investor in sola lettura. Potrai vedere il conto, le operazioni e lo storico, senza poter "
+    "aprire, modificare o chiudere operazioni.\n\n"
+    "Scrivimi semplicemente «accesso Investor» e ti fornirò tutti i dati per controllarlo.\n\n"
+    "Se preferisci, puoi anche chiedermi uno screenshot aggiornato del bot reale oppure "
+    "l’accesso alla nostra sala segnali.\n\n"
+    "🆕 Se non hai ancora PU Prime, puoi registrarti qui:\n"
+    "https://puvip.co/la-partners/Pvzi1lQC\n\n"
+    "Dopo la registrazione, scrivimi nome e cognome: controlleremo che il conto sia "
+    "realmente collegato al nostro IB prima di attivare il bot.\n\n"
+    "♻️ Hai già un conto PU Prime? Posso guidarti nel cambio IB utilizzando il codice 23217421.\n\n"
+    "Dimmi pure da dove vuoi iniziare: hai già esperienza con bot automatici o trading, "
+    "oppure parti da zero? 😊"
+)
+CHANNEL_JOIN_CAMPAIGNS = {
+    SIGNAL_ROOM_URL: {
+        "source": SIGNAL_ROOM_SOURCE,
+        "language": "it",
+        "welcome": SIGNAL_ROOM_WELCOME_MESSAGE,
+        "button_text": "VERIFICA ACCESSO PU PRIME ✅",
+        "button_url": "https://t.me/XauMachineAisupport_bot?start=signal_room_24h",
+    },
+    LEOTRADING_INVITE_LINK: {
+        "source": LEOTRADING_SOURCE,
+        "language": "en",
+        "welcome": LEOTRADING_WELCOME_MESSAGE,
+        "button_text": "START XAU MACHINE 🚀",
+        "button_url": "https://t.me/XauMachineAisupport_bot?start=tg_en_leotrading",
+    },
+    ALICE_INVITE_LINK: {
+        "source": ALICE_SOURCE,
+        "language": "it",
+        "welcome": ALICE_WELCOME_MESSAGE,
+        "button_text": "AVVIA XAU MACHINE 🚀",
+        "button_url": "https://t.me/XauMachineAisupport_bot?start=tg_it_alice",
+    },
+}
 
 
 class HealthHandler(BaseHTTPRequestHandler):
@@ -65,9 +129,11 @@ AI_RUNTIME_RULES = """Sei l'assistente commerciale ufficiale di XAU Machine su T
 Rispondi in modo naturale, fluido e breve nella lingua usata dal cliente.
 Non chiedere al cliente di usare comandi: i comandi sono riservati all'amministratore.
 Segui il prompt commerciale del CRM e usa lo storico della conversazione.
-Non inventare verifiche IB, depositi, risultati, saldi o rendimenti. Non promettere guadagni
-e spiega con chiarezza che il trading comporta il rischio di perdita. Se non hai un dato
-reale o non sai rispondere, proponi il passaggio a un operatore umano.
+Non inventare verifiche IB, depositi, risultati, saldi o rendimenti e non promettere guadagni.
+Non aggiungere automaticamente disclaimer sul rischio, avvertenze generiche sul trading o
+promemoria sullo stop loss. Parlane soltanto se il cliente chiede esplicitamente informazioni
+su rischi, perdite o gestione del rischio. Se non hai un dato reale o non sai rispondere,
+proponi il passaggio a un operatore umano.
 Se chiedono una verifica PU Prime e non esiste una verifica reale nei dati, rispondi:
 "Al momento non ti trovo dentro iscritto con noi su PU Prime, sei sicuro? Hai scritto bene nome e cognome?"
 Non dire "verifico" se non hai un dato reale. Quando chiedono la sala segnali, fornisci sempre il link ufficiale.
@@ -233,7 +299,8 @@ async def crea_richiesta_screenshot(table_row: dict) -> dict | None:
 
 async def attendi_e_invia_screenshot(context: ContextTypes.DEFAULT_TYPE, chat_id: int,
                                       riga_id: str, tentativi_max: int = 20,
-                                      attesa_secondi: float = 3.0) -> None:
+                                      attesa_secondi: float = 3.0,
+                                      business_connection_id: str | None = None) -> None:
     """Fa polling della riga finche' il worker MT5 sulla VPS non la segna
     'fatto' (o 'errore'), poi manda la foto nella stessa chat. Timeout
     totale: ~tentativi_max * attesa_secondi (default 60s)."""
@@ -279,6 +346,7 @@ async def attendi_e_invia_screenshot(context: ContextTypes.DEFAULT_TYPE, chat_id
                     text=("Il terminale MT5 non sta restituendo dati validi del conto. "
                           "Non ti mando uno screenshot vuoto: ho avvisato l'operatore "
                           "per controllare la connessione."),
+                    business_connection_id=business_connection_id,
                 )
                 if ADMIN_CHAT_ID:
                     try:
@@ -293,6 +361,7 @@ async def attendi_e_invia_screenshot(context: ContextTypes.DEFAULT_TYPE, chat_id
                 await context.bot.send_photo(
                     chat_id=chat_id, photo=riga["immagine_url"],
                     caption="📊 Ecco l'andamento del conto reale.",
+                    business_connection_id=business_connection_id,
                 )
             except Exception as exc:
                 log.warning("Invio foto MT5 fallito: %s", exc)
@@ -300,6 +369,7 @@ async def attendi_e_invia_screenshot(context: ContextTypes.DEFAULT_TYPE, chat_id
                     await context.bot.send_message(
                         chat_id=chat_id,
                         text="Ho lo screenshot pronto ma non riesco a mandartelo adesso: riprova tra poco.",
+                        business_connection_id=business_connection_id,
                     )
                 except Exception:
                     pass
@@ -310,6 +380,7 @@ async def attendi_e_invia_screenshot(context: ContextTypes.DEFAULT_TYPE, chat_id
                     chat_id=chat_id,
                     text="Non sono riuscito a recuperare i dati del conto in questo momento. "
                          "Ci riprovo tra poco, oppure scrivi /intervento_umano.",
+                    business_connection_id=business_connection_id,
                 )
             except Exception:
                 pass
@@ -318,6 +389,7 @@ async def attendi_e_invia_screenshot(context: ContextTypes.DEFAULT_TYPE, chat_id
         await context.bot.send_message(
             chat_id=chat_id,
             text="Ci sto mettendo più del previsto a recuperare i dati del conto: appena pronti te li mando qui.",
+            business_connection_id=business_connection_id,
         )
     except Exception:
         pass
@@ -370,7 +442,10 @@ async def richiedi_screenshot_mt5(update: Update, context: ContextTypes.DEFAULT_
     attesa = f"Un attimo, controllo il conto reale {descrizione or ''}… 📊".replace("  ", " ")
     await msg.reply_text(attesa)
     await record_message(update, "out", attesa, "ai")
-    asyncio.create_task(attendi_e_invia_screenshot(context, chat.id, riga["id"]))
+    asyncio.create_task(attendi_e_invia_screenshot(
+        context, chat.id, riga["id"],
+        business_connection_id=getattr(msg, "business_connection_id", None),
+    ))
 
 
 async def get_welcome_message(deep_link_code: str):
@@ -482,6 +557,31 @@ async def crm_topic_save(*, telegram_user_id: int, telegram_chat_id: int,
     if not forum_chat_id or not CRM_TRACKING_SECRET:
         return False
 
+    headers = dict(CRM_HEADERS)
+    headers.pop("Prefer", None)
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.post(
+                f"{SUPABASE_URL}/rest/v1/rpc/crm_upsert_telegram_topic",
+                headers=headers,
+                json={
+                    "p_secret": CRM_TRACKING_SECRET,
+                    "p_tenant_slug": CRM_TENANT_SLUG,
+                    "p_telegram_user_id": telegram_user_id,
+                    "p_telegram_chat_id": telegram_chat_id,
+                    "p_forum_chat_id": int(forum_chat_id),
+                    "p_message_thread_id": message_thread_id,
+                    "p_topic_name": topic_name,
+                },
+            )
+        if r.status_code >= 300:
+            log.warning("Salvataggio Topic CRM fallito %s: %s", r.status_code, r.text[:200])
+            return False
+        return True
+    except Exception as exc:
+        log.warning("Salvataggio Topic CRM non disponibile: %s", exc)
+        return False
+
 
 async def crm_store_language(update: Update) -> None:
     """Salva la lingua Telegram del cliente per le risposte manuali tradotte."""
@@ -558,30 +658,6 @@ async def google_translate_from_italian(text: str, target_language: str) -> tupl
     except Exception as exc:
         log.warning("Google Translate non disponibile: %s", exc)
         return text, False
-    headers = dict(CRM_HEADERS)
-    headers.pop("Prefer", None)
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            r = await client.post(
-                f"{SUPABASE_URL}/rest/v1/rpc/crm_upsert_telegram_topic",
-                headers=headers,
-                json={
-                    "p_secret": CRM_TRACKING_SECRET,
-                    "p_tenant_slug": CRM_TENANT_SLUG,
-                    "p_telegram_user_id": telegram_user_id,
-                    "p_telegram_chat_id": telegram_chat_id,
-                    "p_forum_chat_id": int(forum_chat_id),
-                    "p_message_thread_id": message_thread_id,
-                    "p_topic_name": topic_name,
-                },
-            )
-        if r.status_code >= 300:
-            log.warning("Salvataggio Topic CRM fallito %s: %s", r.status_code, r.text[:200])
-            return False
-        return True
-    except Exception as exc:
-        log.warning("Salvataggio Topic CRM non disponibile: %s", exc)
-        return False
 
 
 async def ensure_customer_topic(update: Update) -> int | None:
@@ -627,11 +703,15 @@ async def ensure_customer_topic(update: Update) -> int | None:
 
 async def mirror_text_to_forum(update: Update, direction: str, body: str,
                                sender_type: str | None = None) -> None:
-    """Specchia nel Topic i testi privati del cliente e dell'assistente."""
+    """Specchia nel Topic soltanto le chat dell'account Telegram Business."""
     forum_chat_id = support_forum_chat_id()
     if not forum_chat_id or not body or not update.effective_chat:
         return
     if update.effective_chat.type != "private":
+        return
+    if update.effective_user and update.effective_user.is_bot:
+        return
+    if not getattr(update.effective_message, "business_connection_id", None):
         return
     thread_id = await ensure_customer_topic(update)
     if not thread_id:
@@ -714,15 +794,46 @@ async def forum_operator_message(update: Update, context: ContextTypes.DEFAULT_T
                 chat_id=int(mapping["telegram_chat_id"]),
                 text=body,
                 disable_web_page_preview=True,
+                business_connection_id=mapping.get("business_connection_id"),
             )
             if str(mapping.get("language") or "it") != "it" and not translated:
                 await msg.reply_text("⚠️ Google Translate non disponibile: il messaggio e' stato inviato in italiano.")
         else:
-            await context.bot.copy_message(
-                chat_id=int(mapping["telegram_chat_id"]),
-                from_chat_id=chat.id,
-                message_id=msg.message_id,
-            )
+            business_connection_id = mapping.get("business_connection_id")
+            if business_connection_id and msg.photo:
+                telegram_file = await msg.photo[-1].get_file()
+                payload = bytes(await telegram_file.download_as_bytearray())
+                await context.bot.send_photo(
+                    chat_id=int(mapping["telegram_chat_id"]),
+                    photo=payload,
+                    caption=msg.caption,
+                    business_connection_id=business_connection_id,
+                )
+            elif business_connection_id and msg.video:
+                telegram_file = await msg.video.get_file()
+                payload = bytes(await telegram_file.download_as_bytearray())
+                await context.bot.send_video(
+                    chat_id=int(mapping["telegram_chat_id"]),
+                    video=payload,
+                    caption=msg.caption,
+                    business_connection_id=business_connection_id,
+                )
+            elif business_connection_id and msg.document:
+                telegram_file = await msg.document.get_file()
+                payload = bytes(await telegram_file.download_as_bytearray())
+                await context.bot.send_document(
+                    chat_id=int(mapping["telegram_chat_id"]),
+                    document=payload,
+                    filename=msg.document.file_name,
+                    caption=msg.caption,
+                    business_connection_id=business_connection_id,
+                )
+            else:
+                await context.bot.copy_message(
+                    chat_id=int(mapping["telegram_chat_id"]),
+                    from_chat_id=chat.id,
+                    message_id=msg.message_id,
+                )
             body = msg.caption or "Allegato inviato dall'operatore"
         await crm_record_forum_reply(mapping, body)
         pause = await crm_set_ai_control(int(mapping["telegram_chat_id"]), "pause_1h")
@@ -748,6 +859,116 @@ async def crm_ai_attiva(chat_id: int) -> bool:
         log.warning("Controllo stato IA non riuscito, IA resta attiva: %s", exc)
     return True
 
+async def ensure_outbox_topic(app, row: dict) -> int | None:
+    """Recupera o crea il Topic anche per lead nati prima dell'attivazione Forum."""
+    forum = support_forum_chat_id()
+    chat_id = int(str(row.get("telegram_chat_id") or "0"))
+    if not forum or not chat_id:
+        return None
+    mapping = await crm_topic_lookup(telegram_user_id=chat_id)
+    if mapping.get("message_thread_id"):
+        return int(mapping["message_thread_id"])
+    raw_name = str(row.get("full_name") or f"Cliente {chat_id}")
+    topic_name = re.sub(r"\\s+", " ", raw_name).strip()[:120]
+    topic = await app.bot.create_forum_topic(chat_id=int(forum), name=topic_name)
+    thread_id = int(topic.message_thread_id)
+    saved = await crm_topic_save(
+        telegram_user_id=chat_id,
+        telegram_chat_id=chat_id,
+        message_thread_id=thread_id,
+        topic_name=topic_name,
+    )
+    if not saved:
+        log.warning("Topic follow-up creato ma associazione CRM non salvata: %s", thread_id)
+    await app.bot.send_message(
+        chat_id=int(forum),
+        message_thread_id=thread_id,
+        text=f"👤 Conversazione recuperata dal CRM\\nNome: {topic_name}\\nTelegram ID: {chat_id}",
+    )
+    return thread_id
+
+
+async def ack_followup_topic_mirror(followup_id: str | None) -> None:
+    if not followup_id:
+        return
+    headers = dict(CRM_HEADERS)
+    headers.pop("Prefer", None)
+    async with httpx.AsyncClient(timeout=10) as client:
+        r = await client.post(
+            f"{SUPABASE_URL}/rest/v1/rpc/crm_ack_topic_mirror",
+            headers=headers,
+            json={
+                "p_secret": CRM_TRACKING_SECRET,
+                "p_tenant_slug": CRM_TENANT_SLUG,
+                "p_followup_id": followup_id,
+            },
+        )
+    if r.status_code >= 300:
+        raise RuntimeError(f"ACK Topic {r.status_code}: {r.text[:160]}")
+
+
+async def forward_followup_to_topic(app, row: dict) -> None:
+    """Replica ogni follow-up consegnato nel Topic CRM del cliente."""
+    try:
+        thread_id = await ensure_outbox_topic(app, row)
+        if not thread_id:
+            return
+        body = str(row.get("body") or "").strip()
+        if not body:
+            return
+        await app.bot.send_message(
+            chat_id=int(support_forum_chat_id()),
+            message_thread_id=thread_id,
+            text="📤 Follow-up inviato al cliente\n\n" + body,
+            disable_web_page_preview=True,
+        )
+        await ack_followup_topic_mirror(row.get("id"))
+        log.info("Follow-up inoltrato nel Topic CRM: %s -> thread %s", row.get("id"), thread_id)
+    except Exception as exc:
+        log.warning("Forward follow-up nel Topic CRM fallito %s: %s", row.get("id"), exc)
+
+
+async def backfill_unmirrored_followups(app) -> None:
+    """Copia nei Topic i follow-up storici già consegnati, senza reinviarli ai clienti."""
+    if not CRM_TRACKING_SECRET or not support_forum_chat_id():
+        return
+    headers = dict(CRM_HEADERS)
+    headers.pop("Prefer", None)
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.post(
+                f"{SUPABASE_URL}/rest/v1/rpc/crm_get_unmirrored_followups",
+                headers=headers,
+                json={
+                    "p_secret": CRM_TRACKING_SECRET,
+                    "p_tenant_slug": CRM_TENANT_SLUG,
+                    "p_limit": 200,
+                },
+            )
+        if r.status_code >= 300:
+            log.warning("Recupero follow-up storici fallito %s: %s", r.status_code, r.text[:200])
+            return
+        rows = r.json() or []
+        for row in rows:
+            await forward_followup_to_topic(app, row)
+        if rows:
+            log.info("Recupero Topic completato: %s follow-up storici copiati", len(rows))
+    except Exception as exc:
+        log.warning("Recupero follow-up storici non disponibile: %s", exc)
+
+
+async def crm_business_connection_id(chat_id: int | str) -> str | None:
+    """Recupera la connessione Business persistita per una chat cliente."""
+    try:
+        # Usa la RPC protetta del CRM: la chiave pubblicabile del runtime non
+        # deve leggere direttamente crm_leads, che e' protetta da RLS.
+        mapping = await crm_topic_lookup(telegram_user_id=int(chat_id))
+        return mapping.get("business_connection_id") or None
+    except Exception as exc:
+        log.warning("Connessione Telegram Business non disponibile: %s", exc)
+    return None
+
+
 async def poll_operator_outbox(app) -> None:
     headers = dict(CRM_HEADERS); headers.pop("Prefer", None)
     await asyncio.sleep(3)
@@ -761,9 +982,18 @@ async def poll_operator_outbox(app) -> None:
                 success = False
                 error_text = None
                 try:
-                    await app.bot.send_message(chat_id=row["telegram_chat_id"], text=row["body"])
+                    business_connection_id = await crm_business_connection_id(row["telegram_chat_id"])
+                    await app.bot.send_message(
+                        chat_id=row["telegram_chat_id"],
+                        text=row["body"],
+                        business_connection_id=business_connection_id,
+                    )
                     success = True
                     log.info("Messaggio operatore inviato su Telegram: %s", row.get("id"))
+                    # Nel gruppo di supporto mostriamo soltanto le chat gestite
+                    # tramite l'account Telegram Business, non tutto l'outbox CRM.
+                    if business_connection_id:
+                        await forward_followup_to_topic(app, row)
                 except Exception as exc:
                     error_text = str(exc)
                     log.warning("Invio messaggio operatore %s fallito: %s", row.get("id"), exc)
@@ -825,7 +1055,6 @@ async def sala_segnali_risultati(periodo: str = "day", simbolo: str | None = Non
     righe = [f"📊 Risultati sala segnali{filtro} {label}:", f"Segnali totali: {totale}"]
     for key, label_key in (("tp1","TP1 raggiunti"),("tp2","TP2 raggiunti"),("tp3","TP3 raggiunti"),("tp_oltre","Oltre TP3"),("sl","Stop Loss"),("aperti","Ancora aperti"),("chiusi_manuale","Chiusi manualmente")):
         if s.get(key): righe.append(f"{label_key}: {s[key]}")
-    righe.append("Il trading comporta rischi: dati storici, non promessa di risultati futuri.")
     righe.append(f"Sala segnali: {SIGNAL_ROOM_URL}")
     return "\n".join(righe)
 
@@ -871,7 +1100,11 @@ async def sala_segnali_contesto_ai() -> str:
                 updated=row.get("updated_at") or row.get("opened_at") or "n/d",
             )
         )
-    lines.append("Usali solo se pertinenti alla domanda; non dare raccomandazioni personalizzate e ricorda i rischi.")
+    lines.append(
+        "Usali solo se pertinenti alla domanda e non dare raccomandazioni personalizzate. "
+        "Non aggiungere disclaimer generici sul rischio o promemoria sullo stop loss, "
+        "a meno che il cliente non chieda esplicitamente dei rischi."
+    )
     return "\n".join(lines)
 
 
@@ -900,6 +1133,7 @@ async def record_message(update: Update, direction="in", body: str | None = None
         "p_direction": direction,
         "p_body": (body or "")[:8000],
         "p_sender_type": sender_type,
+        "p_business_connection_id": getattr(update.effective_message, "business_connection_id", None),
     }
     try:
         headers = dict(CRM_HEADERS)
@@ -1192,27 +1426,38 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     if msg is None or not update.effective_chat:
         return
+    # Un bot che scrive all'account Business non e' un lead: rispondergli
+    # creerebbe un loop bot-to-bot e centinaia di messaggi inutili nel CRM.
+    if update.effective_user and update.effective_user.is_bot:
+        log.info("Messaggio Telegram ignorato da account bot: @%s", update.effective_user.username or update.effective_user.id)
+        return
     testo = msg.text or ""
     testo_lower = testo.lower()
-    if any(x in testo_lower for x in ("risultati", "risultato", "quanti tp", "quante tp", "quanti stop", "tp avete preso", "performance", "resoconto")):
-        # I report della sala e il funnel sono dati interni: non devono mai
-        # essere restituiti a un cliente, anche se usa parole come
-        # "risultati" nella chat privata. Solo l'ADMIN_CHAT_ID può riceverli.
-        if not is_admin_chat(update.effective_chat.id):
-            risposta_privata = "I report e i dati interni della sala sono riservati all'operatore. Per informazioni sulla sala segnali usa il link ufficiale."
-            await record_message(update, "in", testo, "lead")
-            await msg.reply_text(risposta_privata, disable_web_page_preview=True)
-            await record_message(update, "out", risposta_privata, "ai")
-            return
-        risposta = await sala_segnali_risultati(_rileva_periodo_sala(testo), _rileva_simbolo_sala(testo))
+    categorie_richieste = (
+        any(x in testo_lower for x in ("come funziona il bot", "bot automatico", "copy trading")),
+        any(x in testo_lower for x in ("rischi", "rischio", "risk")),
+        any(x in testo_lower for x in ("risultati", "risultato", "performance", "storico")),
+        any(x in testo_lower for x in ("screenshot", "screen shot", "mt5", "metatrader")),
+        any(x in testo_lower for x in ("investor", "sola lettura")),
+    )
+    richiesta_composta = sum(categorie_richieste) >= 2
+    richiesta_report_sala = (
+        any(x in testo_lower for x in ("risultati", "risultato", "quanti tp", "quante tp", "quanti stop", "tp avete preso", "performance", "resoconto"))
+        and any(x in testo_lower for x in ("sala segnali", "sala signal", "signal room"))
+    )
+    if richiesta_report_sala and is_admin_chat(update.effective_chat.id):
+        # Il report numerico interno resta disponibile soltanto all'admin.
+        # Le domande dei clienti devono arrivare all'AI per ricevere una
+        # risposta completa, anche quando contengono la parola "risultati".
+        risposta = await sala_segnali_risultati(
+            _rileva_periodo_sala(testo),
+            _rileva_simbolo_sala(testo),
+        )
         await record_message(update, "in", testo, "lead")
         await msg.reply_text(risposta)
         await record_message(update, "out", risposta, "ai")
         return
-    if any(x in testo.lower() for x in ("sala segnali", "sala signal", "signal room")):
-        await simple_reply(update, f"📊 Sala segnali XAU Machine — MANUALE\n\nAccedi da qui:\n{SIGNAL_ROOM_URL}\n\nAccesso gratuito per sole 24 ore dal primo ingresso. Le operazioni vengono pubblicate manualmente: la sala non esegue né copia automaticamente le operazioni.\n\n🤖 Il bot/copy trading, invece, è completamente automatico una volta configurato. Il trading comporta rischi e i risultati passati non garantiscono risultati futuri.")
-        return
-    if chiede_credenziali_investor_mt5(testo):
+    if not richiesta_composta and chiede_credenziali_investor_mt5(testo):
         risposta_credenziali = testo_credenziali_investor_mt5()
         await record_message(update, "in", testo, "lead")
         if risposta_credenziali:
@@ -1236,7 +1481,7 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if periodo_risposta:
             await richiedi_screenshot_mt5(update, context, periodo_risposta, testo)
             return
-    periodo = rileva_richiesta_screenshot(testo)
+    periodo = None if richiesta_composta else rileva_richiesta_screenshot(testo)
     if periodo == PERIODO_DA_CHIEDERE:
         context.user_data["awaiting_mt5_period"] = True
         domanda = "Certo 📊 Ti va bene l'andamento di oggi oppure vuoi un altro periodo, per esempio una settimana, un mese o 4 mesi?"
@@ -1274,6 +1519,246 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.reply_text(risposta, disable_web_page_preview=True)
     await record_message(update, "out", risposta, "ai")
 
+
+async def crm_track_channel_join(request, campaign: dict, event_status: str, error: str = "") -> dict:
+    """Registra in modo idempotente richiesta, benvenuto e approvazione."""
+    invite_link = request.invite_link.invite_link if request.invite_link else ""
+    headers = dict(CRM_HEADERS)
+    headers.pop("Prefer", None)
+    payload = {
+        "p_secret": CRM_TRACKING_SECRET,
+        "p_tenant_slug": CRM_TENANT_SLUG,
+        "p_channel_chat_id": request.chat.id,
+        "p_channel_title": request.chat.title or "",
+        "p_telegram_user_id": request.from_user.id,
+        "p_user_chat_id": request.user_chat_id,
+        "p_full_name": request.from_user.full_name or "",
+        "p_username": request.from_user.username or "",
+        "p_invite_link": invite_link,
+        "p_source": campaign["source"],
+        "p_language": campaign["language"],
+        "p_event_status": event_status,
+        "p_error": error[:1000],
+    }
+    try:
+        async with httpx.AsyncClient(timeout=12) as client:
+            response = await client.post(
+                f"{SUPABASE_URL}/rest/v1/rpc/crm_track_channel_join",
+                headers=headers,
+                json=payload,
+            )
+        if response.status_code >= 300:
+            log.warning("Tracciamento ingresso canale fallito %s: %s", response.status_code, response.text[:200])
+            return {}
+        return response.json() or {}
+    except Exception as exc:
+        log.warning("Tracciamento ingresso canale non disponibile: %s", exc)
+        return {}
+
+
+async def crm_track_signal_room_member(member_update, event_status: str = "approved") -> dict:
+    """Registra un ingresso diretto nella sala segnali usando lo stesso RPC protetto."""
+    invite_link = member_update.invite_link.invite_link if member_update.invite_link else ""
+    user = member_update.new_chat_member.user
+    headers = dict(CRM_HEADERS)
+    headers.pop("Prefer", None)
+    payload = {
+        "p_secret": CRM_TRACKING_SECRET,
+        "p_tenant_slug": CRM_TENANT_SLUG,
+        "p_channel_chat_id": member_update.chat.id,
+        "p_channel_title": member_update.chat.title or "",
+        "p_telegram_user_id": user.id,
+        "p_user_chat_id": user.id,
+        "p_full_name": user.full_name or "",
+        "p_username": user.username or "",
+        "p_invite_link": invite_link,
+        "p_source": SIGNAL_ROOM_SOURCE,
+        "p_language": "it",
+        "p_event_status": event_status,
+        "p_error": "",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=12) as client:
+            response = await client.post(
+                f"{SUPABASE_URL}/rest/v1/rpc/crm_track_channel_join",
+                headers=headers,
+                json=payload,
+            )
+        if response.status_code >= 300:
+            log.warning("Tracciamento membro sala segnali fallito %s: %s", response.status_code, response.text[:200])
+            return {}
+        return response.json() or {}
+    except Exception as exc:
+        log.warning("Tracciamento membro sala segnali non disponibile: %s", exc)
+        return {}
+
+
+async def signal_room_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Avvia le 24 ore anche quando l'utente entra senza richiesta di approvazione."""
+    member_update = update.chat_member
+    if not member_update:
+        return
+    old_status = member_update.old_chat_member.status
+    new_status = member_update.new_chat_member.status
+    user = member_update.new_chat_member.user
+    invite_link = member_update.invite_link.invite_link if member_update.invite_link else ""
+    joined = old_status in ("left", "kicked") and new_status in ("member", "administrator", "creator")
+    if not joined or user.is_bot or invite_link != SIGNAL_ROOM_URL:
+        return
+    await crm_track_signal_room_member(member_update)
+
+
+async def record_signal_room_moderation(event_id: str, success: bool, error: str = "") -> None:
+    headers = dict(CRM_HEADERS)
+    headers.pop("Prefer", None)
+    payload = {
+        "p_secret": CRM_TRACKING_SECRET,
+        "p_tenant_slug": CRM_TENANT_SLUG,
+        "p_event_id": event_id,
+        "p_success": success,
+        "p_error": error[:1000],
+    }
+    async with httpx.AsyncClient(timeout=12) as client:
+        response = await client.post(
+            f"{SUPABASE_URL}/rest/v1/rpc/crm_record_signal_room_moderation",
+            headers=headers,
+            json=payload,
+        )
+        response.raise_for_status()
+
+
+async def poll_signal_room_expirations(app: Application) -> None:
+    """Ogni 5 minuti rimuove gli accessi scaduti non verificati nel CRM PU Prime."""
+    await asyncio.sleep(20)
+    headers = dict(CRM_HEADERS)
+    headers.pop("Prefer", None)
+    while True:
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                response = await client.post(
+                    f"{SUPABASE_URL}/rest/v1/rpc/crm_claim_expired_signal_room_members",
+                    headers=headers,
+                    json={
+                        "p_secret": CRM_TRACKING_SECRET,
+                        "p_tenant_slug": CRM_TENANT_SLUG,
+                        "p_limit": 100,
+                    },
+                )
+            response.raise_for_status()
+            expired = response.json() or []
+            for item in expired:
+                event_id = str(item["event_id"])
+                chat_id = int(item["channel_chat_id"])
+                user_id = int(item["telegram_user_id"])
+                try:
+                    await app.bot.ban_chat_member(chat_id=chat_id, user_id=user_id)
+                    try:
+                        await app.bot.unban_chat_member(
+                            chat_id=chat_id,
+                            user_id=user_id,
+                            only_if_banned=True,
+                        )
+                    except Exception as unban_exc:
+                        log.warning("Utente rimosso ma non sbloccato per il rientro %s: %s", user_id, unban_exc)
+                    await record_signal_room_moderation(event_id, True)
+                    log.info("Accesso sala segnali scaduto: utente %s rimosso da %s", user_id, chat_id)
+                    if ADMIN_CHAT_ID:
+                        try:
+                            await app.bot.send_message(
+                                chat_id=int(ADMIN_CHAT_ID),
+                                text=(
+                                    "🚫 Accesso sala segnali scaduto\n"
+                                    f"Cliente: {item.get('full_name') or user_id}\n"
+                                    "Motivo: non verificato nel CRM PU Prime dopo 24 ore."
+                                ),
+                            )
+                        except Exception as notify_exc:
+                            log.warning("Notifica admin rimozione fallita: %s", notify_exc)
+                except Exception as exc:
+                    log.warning("Rimozione sala segnali fallita per %s: %s", user_id, exc)
+                    try:
+                        await record_signal_room_moderation(event_id, False, str(exc))
+                    except Exception as record_exc:
+                        log.warning("Registrazione errore moderazione fallita: %s", record_exc)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.warning("Controllo scadenze sala segnali non disponibile: %s", exc)
+        await asyncio.sleep(300)
+
+
+async def channel_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Accoglie, traccia e approva le richieste dei link configurati."""
+    request = update.chat_join_request
+    if not request:
+        return
+    used_link = request.invite_link.invite_link if request.invite_link else ""
+    campaign = CHANNEL_JOIN_CAMPAIGNS.get(used_link)
+    if not campaign:
+        return
+
+    tracked = await crm_track_channel_join(request, campaign, "requested")
+    if not tracked.get("already_welcomed"):
+        try:
+            await context.bot.send_message(
+                chat_id=request.user_chat_id,
+                text=campaign["welcome"],
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton(campaign["button_text"], url=campaign["button_url"])
+                ]]),
+                disable_web_page_preview=True,
+            )
+            await crm_track_channel_join(request, campaign, "welcomed")
+        except Exception as exc:
+            await crm_track_channel_join(request, campaign, "welcome_failed", str(exc))
+            log.warning("Benvenuto richiesta canale fallito per %s: %s", request.from_user.id, exc)
+
+    try:
+        await context.bot.approve_chat_join_request(
+            chat_id=request.chat.id,
+            user_id=request.from_user.id,
+        )
+        await crm_track_channel_join(request, campaign, "approved")
+    except Exception as exc:
+        await crm_track_channel_join(request, campaign, "approval_failed", str(exc))
+        log.warning("Approvazione richiesta canale fallita per %s: %s", request.from_user.id, exc)
+
+
+async def channel_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Mostra all'amministratore i conteggi separati per campagna."""
+    if not update.effective_chat or not is_admin_chat(update.effective_chat.id):
+        return
+    headers = dict(CRM_HEADERS)
+    headers.pop("Prefer", None)
+    try:
+        sezioni = []
+        sorgenti = (("LeoTrading English", LEOTRADING_SOURCE), ("Alice Trading IT", ALICE_SOURCE))
+        async with httpx.AsyncClient(timeout=12) as client:
+            for nome, source in sorgenti:
+                response = await client.post(
+                    f"{SUPABASE_URL}/rest/v1/rpc/crm_channel_join_stats",
+                    headers=headers,
+                    json={
+                        "p_secret": CRM_TRACKING_SECRET,
+                        "p_tenant_slug": CRM_TENANT_SLUG,
+                        "p_source": source,
+                    },
+                )
+                response.raise_for_status()
+                stats = response.json() or {}
+                sezioni.append(
+                    f"📊 {nome}\n"
+                    f"Persone uniche: {stats.get('unique_users', 0)}\n"
+                    f"Richieste: {stats.get('requests', 0)} · "
+                    f"Benvenuti: {stats.get('welcomed', 0)} · "
+                    f"Approvati: {stats.get('approved', 0)} · "
+                    f"Errori: {stats.get('errors', 0)}"
+                )
+        await update.effective_message.reply_text("\n\n".join(sezioni))
+    except Exception as exc:
+        log.warning("Statistiche ingresso canale non disponibili: %s", exc)
+        await update.effective_message.reply_text("⚠️ Statistiche non disponibili in questo momento.")
+
 async def on_error(update, context: ContextTypes.DEFAULT_TYPE):
     """Rete di sicurezza: qualunque eccezione non prevista finisce qui
     invece di far cadere il processo o restare silenziosa nei log."""
@@ -1292,6 +1777,8 @@ async def post_init(app):
         ACTIVE_SUPPORT_FORUM_CHAT_ID = configured_forum
     log.info("Telegram support Forum configured: %s", bool(support_forum_chat_id()))
     app.create_task(poll_operator_outbox(app), name="crm-operator-outbox")
+    app.create_task(poll_signal_room_expirations(app), name="signal-room-24h-enforcement")
+    log.info("Signal room 24h enforcement enabled for %s", SIGNAL_ROOM_URL)
     app.bot_data["puprime_sync_task"] = puprime_sync.start()
 
 async def post_stop(app):
@@ -1304,8 +1791,10 @@ def main():
     threading.Thread(target=start_health_server, daemon=True, name="health-server").start()
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).post_stop(post_stop).build()
     app.add_error_handler(on_error)
-    for cmd, fn in {"start":start,"help":help_cmd,"registrazione":registration,"sala_segnali":signals,"verifica_ib":verify_ib,"deposito":deposit,"guida_bot":guide,"screenshot":screenshot,"intervento_umano":human,"attiva_supporto":activate_support_forum}.items():
+    for cmd, fn in {"start":start,"help":help_cmd,"registrazione":registration,"sala_segnali":signals,"verifica_ib":verify_ib,"deposito":deposit,"guida_bot":guide,"screenshot":screenshot,"intervento_umano":human,"attiva_supporto":activate_support_forum,"statistiche_canale":channel_stats}.items():
         app.add_handler(CommandHandler(cmd, fn))
+    app.add_handler(ChatJoinRequestHandler(channel_join_request))
+    app.add_handler(ChatMemberHandler(signal_room_member_update, ChatMemberHandler.CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.ChatType.SUPERGROUP, forum_operator_message), group=1)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, text_message))
     log.info("XAU Machine Bot v2 online")
@@ -1314,4 +1803,4 @@ def main():
 if __name__ == "__main__":
     main()
 
-# Railway deployment marker: Telegram forum bridge.
+# Railway deployment marker: LeoTrading EN and Alice Trading IT onboarding.
