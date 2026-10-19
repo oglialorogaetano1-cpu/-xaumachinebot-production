@@ -1,0 +1,11 @@
+{
+  "product": "ai_trader_mt5_lifetime",
+  "version": "v0.6.0",
+  "status": "approved-for-activation",
+  "delivery_filename": "AI_Trader_MT5_Commercial_Delivery.zip",
+  "sha256": "01548f655fe1b7da39b8ad30fae6c184c1a632d0dc2978a0132f1287c59ea532",
+  "byte_size": 84855,
+  "generated_at": "2026-10-19T20:42:38Z",
+  "contains_source": false,
+  "activation_required": true
+}

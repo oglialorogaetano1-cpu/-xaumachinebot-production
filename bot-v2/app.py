@@ -1,6 +1,7 @@
 import os
 import asyncio
 import json
+import hashlib
 import logging
 import re
 import secrets
@@ -33,6 +34,9 @@ MT5_INVESTOR_PASSWORD = os.environ.get("MT5_INVESTOR_PASSWORD", "")
 AI_TRADER_DELIVERY_FILE = os.path.join(
     os.path.dirname(__file__), "assets", "AI_Trader_MT5_Commercial_Delivery.zip"
 )
+AI_TRADER_RELEASE_MANIFEST = os.path.join(os.path.dirname(__file__), "assets", "release-manifest.json")
+CRM_RELEASE_STORAGE_BUCKET = "crm-bot-releases"
+CRM_RELEASE_PRODUCT = "ai-trader-mt5"
 AI_TRADER_GUIDE_IT_URL = os.environ.get(
     "AI_TRADER_GUIDE_IT_URL",
     "https://ai-trader-mt5-checkout.vercel.app/guides/AI_Trader_MT5_Guida_Installazione_IT.pdf",
@@ -1936,10 +1940,53 @@ async def on_error(update, context: ContextTypes.DEFAULT_TYPE):
     invece di far cadere il processo o restare silenziosa nei log."""
     log.error("Aggiornamento non gestito: %s", update, exc_info=context.error)
 
+async def sync_commercial_release_to_crm() -> None:
+    """Mirror the exact customer ZIP to private CRM storage at every deploy."""
+    if not os.path.isfile(AI_TRADER_DELIVERY_FILE) or not os.path.isfile(AI_TRADER_RELEASE_MANIFEST):
+        log.warning("CRM release sync skipped: commercial ZIP or manifest missing")
+        return
+    try:
+        with open(AI_TRADER_RELEASE_MANIFEST, "r", encoding="utf-8") as manifest_file:
+            manifest = json.load(manifest_file)
+        version = str(manifest["version"])
+        if not re.fullmatch(r"v\d+\.\d+\.\d+", version):
+            raise ValueError("invalid release version")
+        with open(AI_TRADER_DELIVERY_FILE, "rb") as delivery_file:
+            zip_bytes = delivery_file.read()
+        sha256 = hashlib.sha256(zip_bytes).hexdigest()
+        object_path = f"{CRM_RELEASE_PRODUCT}/{version}/AI_Trader_MT5_Commercial_Delivery.zip"
+        headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}", "Content-Type": "application/zip", "x-upsert": "true"}
+        release = {
+            "product": CRM_RELEASE_PRODUCT, "version": version, "status": "approved",
+            "delivery_filename": "AI_Trader_MT5_Commercial_Delivery.zip",
+            "storage_bucket": CRM_RELEASE_STORAGE_BUCKET, "storage_path": object_path,
+            "sha256": sha256, "byte_size": len(zip_bytes),
+            "release_notes": str(manifest.get("release_notes", "Railway release sync")),
+            "approved_by": "Railway release sync", "approved_at": datetime.now(timezone.utc).isoformat(),
+        }
+        async with httpx.AsyncClient(timeout=45) as client:
+            uploaded = await client.put(f"{SUPABASE_URL}/storage/v1/object/{CRM_RELEASE_STORAGE_BUCKET}/{object_path}", headers=headers, content=zip_bytes)
+            uploaded.raise_for_status()
+            saved = await client.post(
+                f"{SUPABASE_URL}/rest/v1/crm_bot_release_artifacts?on_conflict=product,version",
+                headers={**headers, "Content-Type": "application/json", "Prefer": "resolution=merge-duplicates,return=minimal"}, json=release,
+            )
+            saved.raise_for_status()
+            activated = await client.post(
+                f"{SUPABASE_URL}/rest/v1/rpc/crm_activate_bot_release", headers={**headers, "Content-Type": "application/json"},
+                json={"p_product": CRM_RELEASE_PRODUCT, "p_version": version, "p_operator": "Railway release sync", "p_notes": "Automatic private ZIP synchronization"},
+            )
+            activated.raise_for_status()
+        log.info("CRM commercial release synced: %s sha256=%s", version, sha256)
+    except Exception as exc:
+        log.warning("CRM commercial release sync failed: %s", exc)
+
+
 async def post_init(app):
     global ACTIVE_SUPPORT_FORUM_CHAT_ID
     me = await app.bot.get_me()
     log.info("Telegram bot connected: @%s (id=%s)", me.username, me.id)
+    await sync_commercial_release_to_crm()
     log.info(
         "MT5 Investor access configured: %s",
         bool(testo_credenziali_investor_mt5()),
