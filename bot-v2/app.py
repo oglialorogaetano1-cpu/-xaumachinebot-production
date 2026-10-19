@@ -30,10 +30,9 @@ MT5_INVESTOR_BROKER = os.environ.get("MT5_INVESTOR_BROKER", "")
 MT5_INVESTOR_SERVER = os.environ.get("MT5_INVESTOR_SERVER", "")
 MT5_INVESTOR_LOGIN = os.environ.get("MT5_INVESTOR_LOGIN", "")
 MT5_INVESTOR_PASSWORD = os.environ.get("MT5_INVESTOR_PASSWORD", "")
-AI_TRADER_DELIVERY_URL = os.environ.get(
-    "AI_TRADER_DELIVERY_URL",
-    "https://ai-trader-mt5-checkout.vercel.app/protected/AI_Trader_MT5_Commercial_Delivery.zip",
-).strip()
+AI_TRADER_DELIVERY_FILE = os.path.join(
+    os.path.dirname(__file__), "assets", "AI_Trader_MT5_Commercial_Delivery.zip"
+)
 AI_TRADER_GUIDE_IT_URL = os.environ.get(
     "AI_TRADER_GUIDE_IT_URL",
     "https://ai-trader-mt5-checkout.vercel.app/guides/AI_Trader_MT5_Guida_Installazione_IT.pdf",
@@ -1675,7 +1674,7 @@ async def payment_review_callback(update: Update, context: ContextTypes.DEFAULT_
         # The file is sent only after the admin approval recorded above.
         await context.bot.send_document(
             chat_id=customer_chat_id,
-            document=AI_TRADER_DELIVERY_URL,
+            document=open(AI_TRADER_DELIVERY_FILE, "rb"),
             caption=(
                 "✅ Pagamento confermato. Ecco il pacchetto AI Trader MT5.\n\n"
                 f"Licenza: `{result['license_key']}`\n"
