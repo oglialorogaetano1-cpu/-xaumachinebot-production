@@ -3,12 +3,13 @@ import asyncio
 import json
 import logging
 import re
+import secrets
 import threading
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import httpx
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import Application, ChatJoinRequestHandler, ChatMemberHandler, CommandHandler, MessageHandler, ContextTypes, filters
+from telegram.ext import Application, CallbackQueryHandler, ChatJoinRequestHandler, ChatMemberHandler, CommandHandler, MessageHandler, ContextTypes, filters
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("xau-bot-v2")
@@ -29,6 +30,14 @@ MT5_INVESTOR_BROKER = os.environ.get("MT5_INVESTOR_BROKER", "")
 MT5_INVESTOR_SERVER = os.environ.get("MT5_INVESTOR_SERVER", "")
 MT5_INVESTOR_LOGIN = os.environ.get("MT5_INVESTOR_LOGIN", "")
 MT5_INVESTOR_PASSWORD = os.environ.get("MT5_INVESTOR_PASSWORD", "")
+AI_TRADER_DELIVERY_URL = os.environ.get(
+    "AI_TRADER_DELIVERY_URL",
+    "https://ai-trader-mt5-checkout.vercel.app/protected/AI_Trader_MT5_Commercial_Delivery.zip",
+).strip()
+AI_TRADER_GUIDE_IT_URL = os.environ.get(
+    "AI_TRADER_GUIDE_IT_URL",
+    "https://ai-trader-mt5-checkout.vercel.app/guides/AI_Trader_MT5_Guida_Installazione_IT.pdf",
+).strip()
 GOOGLE_TRANSLATE_API_KEY = os.environ.get("GOOGLE_TRANSLATE_API_KEY", "").strip()
 SIGNAL_ROOM_URL = "https://t.me/+-e1_tDFps0Q2YmE0"
 SIGNAL_ROOM_SOURCE = "signal_room_24h"
@@ -122,6 +131,76 @@ def support_forum_chat_id() -> str:
 def is_admin_chat(chat_id: int | None) -> bool:
     """Reports and internal funnel data are private admin-only data."""
     return bool(chat_id is not None and ADMIN_CHAT_ID and str(chat_id) == str(ADMIN_CHAT_ID).strip())
+
+
+ORDER_ID_RE = re.compile(r"\baitrader-[0-9a-f]{8}-[0-9a-f-]{27,}\b", re.IGNORECASE)
+
+
+async def crm_manual_payment_review(
+    update: Update, order_id: str, screenshot_file_id: str, caption: str,
+) -> dict:
+    """Stores a customer's payment screenshot for a human-only decision."""
+    user = update.effective_user
+    chat = update.effective_chat
+    if not user or not chat:
+        return {}
+    headers = dict(CRM_HEADERS)
+    headers.pop("Prefer", None)
+    payload = {
+        "p_secret": CRM_TRACKING_SECRET,
+        "p_tenant_slug": CRM_TENANT_SLUG,
+        "p_order_id": order_id,
+        "p_customer_chat_id": chat.id,
+        "p_customer_name": user.full_name or "",
+        "p_customer_username": user.username or "",
+        "p_screenshot_file_id": screenshot_file_id,
+        "p_caption": caption or "",
+        "p_transaction_hash": "",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            response = await client.post(
+                f"{SUPABASE_URL}/rest/v1/rpc/crm_create_manual_payment_review",
+                headers=headers, json=payload,
+            )
+        if response.status_code >= 300:
+            log.warning("Registrazione screenshot pagamento fallita %s: %s", response.status_code, response.text[:200])
+            return {}
+        return response.json() or {}
+    except Exception as exc:
+        log.warning("Registrazione screenshot pagamento non disponibile: %s", exc)
+        return {}
+
+
+async def crm_decide_manual_payment(review_id: str, approved: bool, reviewer_id: int) -> dict:
+    """Applies the administrator's irreversible payment decision once."""
+    headers = dict(CRM_HEADERS)
+    headers.pop("Prefer", None)
+    license_key = f"AIT5-{secrets.token_urlsafe(24)}" if approved else None
+    payload = {
+        "p_secret": CRM_TRACKING_SECRET,
+        "p_tenant_slug": CRM_TENANT_SLUG,
+        "p_review_id": review_id,
+        "p_action": "approved" if approved else "rejected",
+        "p_reviewer_telegram_id": reviewer_id,
+        "p_license_key": license_key,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            response = await client.post(
+                f"{SUPABASE_URL}/rest/v1/rpc/crm_review_manual_payment",
+                headers=headers, json=payload,
+            )
+        if response.status_code >= 300:
+            log.warning("Decisione pagamento manuale fallita %s: %s", response.status_code, response.text[:200])
+            return {}
+        result = response.json() or {}
+        if approved:
+            result["license_key"] = license_key
+        return result
+    except Exception as exc:
+        log.warning("Decisione pagamento manuale non disponibile: %s", exc)
+        return {}
 CRM_HEADERS = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}", "Content-Type": "application/json", "Prefer": "return=minimal"}
 
 AI_RUNTIME_RULES = """Sei l'assistente commerciale ufficiale di XAU Machine su Telegram.
@@ -1519,6 +1598,101 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await record_message(update, "out", risposta, "ai")
 
 
+async def payment_screenshot_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Forwards a payment proof to the private admin chat; no payment is auto-approved."""
+    msg = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+    if not msg or not chat or not user or not msg.photo:
+        return
+    caption = msg.caption or ""
+    match = ORDER_ID_RE.search(caption)
+    if not match:
+        await msg.reply_text(
+            "Per verificare il pagamento, scrivi nel testo della foto il codice ordine mostrato nella landing (inizia con aitrader-)."
+        )
+        return
+    review = await crm_manual_payment_review(
+        update, match.group(0).lower(), msg.photo[-1].file_id, caption,
+    )
+    review_id = str(review.get("review_id") or "")
+    if not review_id or not ADMIN_CHAT_ID:
+        await msg.reply_text(
+            "Non riesco ancora a registrare la verifica. Conserva lo screenshot e riprova tra poco."
+        )
+        return
+    try:
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Pagamento ricevuto", callback_data=f"pay:approve:{review_id}"),
+            InlineKeyboardButton("❌ Pagamento non ricevuto", callback_data=f"pay:reject:{review_id}"),
+        ]])
+        await context.bot.send_photo(
+            chat_id=int(ADMIN_CHAT_ID),
+            photo=msg.photo[-1].file_id,
+            caption=(
+                "💳 Verifica pagamento manuale\n"
+                f"Ordine: {match.group(0).lower()}\n"
+                f"Cliente: {user.full_name or '—'} · @{user.username or '—'}\n"
+                f"Chat: {chat.id}\n\n"
+                "Controlla USDT/TRC20 e scegli un solo esito."
+            ),
+            reply_markup=keyboard,
+        )
+        await msg.reply_text("Screenshot ricevuto. Verifichiamo il pagamento e ti aggiorniamo qui.")
+    except Exception as exc:
+        log.warning("Inoltro screenshot pagamento all'admin fallito: %s", exc)
+        await msg.reply_text("Lo screenshot è registrato, ma la notifica all'operatore non è riuscita. Riprova tra poco.")
+
+
+async def payment_review_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query or not query.message or not is_admin_chat(query.message.chat_id):
+        return
+    try:
+        _prefix, action, review_id = (query.data or "").split(":", 2)
+    except ValueError:
+        return
+    if action not in {"approve", "reject"}:
+        return
+    await query.answer("Registro la decisione…")
+    result = await crm_decide_manual_payment(
+        review_id, action == "approve", query.from_user.id,
+    )
+    if not result:
+        await query.edit_message_caption(
+            caption=(query.message.caption or "") + "\n\n⚠️ Decisione non registrata: riprova una sola volta.",
+        )
+        return
+    customer_chat_id = int(result["chat_id"])
+    if action == "reject":
+        await context.bot.send_message(
+            chat_id=customer_chat_id,
+            text="Il pagamento non risulta confermato. Controlla rete TRC20, importo e hash; se serve, crea una nuova richiesta dalla landing.",
+        )
+        await query.edit_message_caption(caption=(query.message.caption or "") + "\n\n❌ Pagamento non ricevuto — cliente avvisato.")
+        return
+    try:
+        # The file is sent only after the admin approval recorded above.
+        await context.bot.send_document(
+            chat_id=customer_chat_id,
+            document=AI_TRADER_DELIVERY_URL,
+            caption=(
+                "✅ Pagamento confermato. Ecco il pacchetto AI Trader MT5.\n\n"
+                f"Licenza: `{result['license_key']}`\n"
+                f"Account MT5: {result['mt5_login']} · {result['mt5_server']}\n\n"
+                f"Guida installazione: {AI_TRADER_GUIDE_IT_URL}\n"
+                "Non condividere la licenza: è associata al tuo account MT5."
+            ),
+            parse_mode="Markdown",
+        )
+        await query.edit_message_caption(caption=(query.message.caption or "") + "\n\n✅ Pagamento ricevuto — licenza e pacchetto inviati al cliente.")
+    except Exception as exc:
+        log.error("Consegna licenza dopo approvazione fallita: %s", exc)
+        await query.edit_message_caption(
+            caption=(query.message.caption or "") + "\n\n⚠️ Pagamento approvato, ma la consegna Telegram è fallita: riprova dalla sezione ordini.",
+        )
+
+
 async def crm_track_channel_join(request, campaign: dict, event_status: str, error: str = "") -> dict:
     """Registra in modo idempotente richiesta, benvenuto e approvazione."""
     invite_link = request.invite_link.invite_link if request.invite_link else ""
@@ -1787,7 +1961,9 @@ def main():
         app.add_handler(CommandHandler(cmd, fn))
     app.add_handler(ChatJoinRequestHandler(channel_join_request))
     app.add_handler(ChatMemberHandler(signal_room_member_update, ChatMemberHandler.CHAT_MEMBER))
+    app.add_handler(CallbackQueryHandler(payment_review_callback, pattern=r"^pay:(?:approve|reject):"))
     app.add_handler(MessageHandler(filters.ChatType.SUPERGROUP, forum_operator_message), group=1)
+    app.add_handler(MessageHandler(filters.PHOTO & filters.ChatType.PRIVATE, payment_screenshot_message))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, text_message))
     log.info("XAU Machine Bot v2 online")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
