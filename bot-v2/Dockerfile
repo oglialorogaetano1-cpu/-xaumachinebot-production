@@ -3,6 +3,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY app.py .
+COPY puprime_sync.py .
+COPY signal_room_policy.py .
 COPY health_server.py .
 COPY assets/ ./assets/
 EXPOSE 8080
