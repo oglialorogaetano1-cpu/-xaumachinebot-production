@@ -669,6 +669,15 @@ async def crm_store_language(update: Update) -> None:
     language = user.language_code.split("-", 1)[0].lower()
     if not re.fullmatch(r"[a-z]{2,3}", language):
         return
+    await crm_store_language_code(update, language)
+
+
+async def crm_store_language_code(update: Update, language: str) -> None:
+    """Aggiorna la lingua effettiva del cliente rilevata dal suo messaggio."""
+    user = update.effective_user
+    chat = update.effective_chat
+    if not user or not chat or chat.type != "private" or not re.fullmatch(r"[a-z]{2,3}", language or ""):
+        return
     headers = dict(CRM_HEADERS)
     headers.pop("Prefer", None)
     try:
@@ -737,6 +746,29 @@ async def google_translate_from_italian(text: str, target_language: str) -> tupl
         return text, False
 
 
+async def google_translate_to_italian(text: str) -> tuple[str, bool, str]:
+    """Traduce i messaggi dei clienti per renderli leggibili nel Topic."""
+    if not text or not GOOGLE_TRANSLATE_API_KEY:
+        return text, False, ""
+    try:
+        async with httpx.AsyncClient(timeout=12) as client:
+            r = await client.post(
+                "https://translation.googleapis.com/language/translate/v2",
+                params={"key": GOOGLE_TRANSLATE_API_KEY},
+                json={"q": text, "target": "it", "format": "text"},
+            )
+        if r.status_code >= 300:
+            log.warning("Google Translate verso italiano fallito %s: %s", r.status_code, r.text[:200])
+            return text, False, ""
+        translation = (((r.json().get("data") or {}).get("translations") or [{}])[0])
+        translated = str(translation.get("translatedText") or "").strip()
+        detected_language = str(translation.get("detectedSourceLanguage") or "").lower()
+        return (translated or text), bool(translated), detected_language
+    except Exception as exc:
+        log.warning("Google Translate verso italiano non disponibile: %s", exc)
+        return text, False, ""
+
+
 async def ensure_customer_topic(update: Update) -> int | None:
     """Crea un Topic per il cliente, riusando sempre quello gia' salvato."""
     forum_chat_id = support_forum_chat_id()
@@ -796,11 +828,18 @@ async def mirror_text_to_forum(update: Update, direction: str, body: str,
     label = "👤 Cliente" if direction not in ("out", "outbound") else (
         "🧑‍💼 Operatore" if sender_type == "human" else "🤖 Assistente"
     )
+    topic_body = body[:3900]
+    if direction not in ("out", "outbound"):
+        italian, translated, detected_language = await google_translate_to_italian(topic_body)
+        if detected_language:
+            await crm_store_language_code(update, detected_language)
+        if translated and italian.casefold() != topic_body.casefold():
+            topic_body = f"{topic_body}\n\n🇮🇹 Italiano: {italian}"
     try:
         await update.get_bot().send_message(
             chat_id=int(forum_chat_id),
             message_thread_id=thread_id,
-            text=f"{label}\n{body[:3900]}",
+            text=f"{label}\n{topic_body}",
             disable_web_page_preview=True,
         )
     except Exception as exc:
