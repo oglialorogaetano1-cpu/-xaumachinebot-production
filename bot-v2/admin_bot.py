@@ -42,7 +42,8 @@ analizzare prompt, conversazioni, topic, traduzioni e stato AI. Non inventare
 azioni riuscite: per ogni modifica proponi una sintesi precisa e chiedi
 conferma. Rispondi in JSON con chiavi reply e change. change e' null oppure un
 oggetto con action tra prompt_update, ai_control, topic_lookup, topic_update,
-sales_send e translation_review.
+sales_send, lead_create, lead_update, channel_create, followup_rule_create e
+conversation_update.
 Per prompt_update usa payload.content, name e language; per ai_control usa
 payload.chat_id e mode (on, off, pause_1h). Per topic_update usa
 telegram_user_id, telegram_chat_id, message_thread_id e topic_name. Per
@@ -148,6 +149,18 @@ async def execute_change(change):
             if queued.status_code >= 300:
                 return False, f"Coda Telegram rifiutata ({queued.status_code})."
             r = await client.post(f"{SUPABASE_URL}/rest/v1/crm_messages", headers=headers, json={"conversation_id": payload["conversation_id"], "tenant_id": "00000000-0000-4000-8000-000000000001", "direction": "outbound", "sender_type": "human", "body": body})
+        elif action == "lead_create":
+            r = await client.post(f"{SUPABASE_URL}/rest/v1/crm_leads", headers={**headers, "Prefer": "return=representation"}, json=payload)
+        elif action == "lead_update":
+            lead_id = payload.pop("id")
+            r = await client.patch(f"{SUPABASE_URL}/rest/v1/crm_leads?id=eq.{lead_id}", headers={**headers, "Prefer": "return=representation"}, json=payload)
+        elif action == "channel_create":
+            r = await client.post(f"{SUPABASE_URL}/rest/v1/crm_channel_sources", headers={**headers, "Prefer": "return=representation"}, json=payload)
+        elif action == "followup_rule_create":
+            r = await client.post(f"{SUPABASE_URL}/rest/v1/crm_followup_rules", headers={**headers, "Prefer": "return=representation"}, json=payload)
+        elif action == "conversation_update":
+            conversation_id = payload.pop("id")
+            r = await client.patch(f"{SUPABASE_URL}/rest/v1/crm_conversations?id=eq.{conversation_id}", headers={**headers, "Prefer": "return=representation"}, json=payload)
         else:
             return False, "Operazione non supportata in modo sicuro."
     if r.status_code >= 300:
@@ -214,7 +227,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log.warning("Admin bot access denied for Telegram user %s", getattr(update.effective_user, "id", "unknown"))
         await update.effective_message.reply_text("⛔ Questo bot e' riservato agli amministratori autorizzati.")
         return
-    await update.effective_message.reply_text("✅ Console amministratore XAU Machine attiva. Scrivimi cosa vuoi controllare o modificare.\n\nComandi: /conversazioni · /analizza <id> · /prompt Nome | testo · /topic utente | chat | thread | nome · /invia chat | conversazione | testo\n\nLe modifiche e gli invii richiedono sempre /conferma.")
+    await update.effective_message.reply_text("✅ Console amministratore XAU Machine attiva.\n\nCRM: /conversazioni · /analizza <id> · /lead nome | lingua | campagna | nota · /stato id | stato · /etichette conversazione | tag1,tag2\nAutomazioni: /regola nome | stato_lead | minuti | messaggio | canale\nCanali: /canale nome | url | lingua | codice | prodotto · /topic utente | chat | thread | nome\nAI/vendite: /prompt Nome | testo · /invia chat | conversazione | testo\n\nLe modifiche e gli invii richiedono sempre /conferma.")
 
 
 async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -297,6 +310,68 @@ async def prepare_sales_send(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await update.effective_message.reply_text("Messaggio sales preparato e non ancora inviato. Usa /conferma per inviarlo o /annulla.")
 
 
+async def stage_change(update: Update, change, message):
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.execute("INSERT OR REPLACE INTO pending_changes(chat_id,payload,created_at) VALUES(?,?,?)", (str(update.effective_chat.id), json.dumps(change), now())); conn.commit()
+    await update.effective_message.reply_text(message + " Usa /conferma per applicare oppure /annulla.")
+
+
+async def prepare_lead(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not authorized(update): return
+    parts = [x.strip() for x in " ".join(context.args).split("|")]
+    if len(parts) != 4 or not all(parts):
+        await update.effective_message.reply_text("Uso: /lead nome | lingua | campagna | nota")
+        return
+    payload = {"full_name": parts[0], "language": parts[1].lower(), "product": "xau_machine", "first_source": parts[2], "last_source": parts[2], "notes": parts[3]}
+    await stage_change(update, {"action": "lead_create", "payload": payload}, "Nuovo lead preparato.")
+
+
+async def prepare_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not authorized(update): return
+    parts = [x.strip() for x in " ".join(context.args).split("|")]
+    if len(parts) != 5 or not all(parts):
+        await update.effective_message.reply_text("Uso: /canale nome | url Telegram | lingua | codice campagna | prodotto")
+        return
+    code = "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in parts[3].lower()).strip("_")
+    payload = {"name": parts[0], "telegram_url": parts[1], "language": parts[2].lower(), "campaign_code": code, "product": parts[4]}
+    await stage_change(update, {"action": "channel_create", "payload": payload}, "Canale Telegram preparato.")
+
+
+async def prepare_rule(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not authorized(update): return
+    parts = [x.strip() for x in " ".join(context.args).split("|")]
+    if len(parts) != 5 or not all(parts):
+        await update.effective_message.reply_text("Uso: /regola nome | stato_lead | attesa_minuti | messaggio | canale")
+        return
+    try:
+        delay = int(parts[2])
+        if delay < 1: raise ValueError
+    except ValueError:
+        await update.effective_message.reply_text("attesa_minuti deve essere un numero positivo.")
+        return
+    payload = {"name": parts[0], "trigger_event": "no_reply", "lead_status": parts[1], "delay_minutes": delay, "channel": parts[4], "message_template": parts[3], "stop_on_reply": True, "enabled": True}
+    await stage_change(update, {"action": "followup_rule_create", "payload": payload}, "Regola follow-up preparata.")
+
+
+async def prepare_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not authorized(update): return
+    parts = [x.strip() for x in " ".join(context.args).split("|", 1)]
+    if len(parts) != 2 or not all(parts):
+        await update.effective_message.reply_text("Uso: /stato id_lead | nuovo_stato")
+        return
+    await stage_change(update, {"action": "lead_update", "payload": {"id": parts[0], "status": parts[1]}}, "Stato lead preparato.")
+
+
+async def prepare_labels(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not authorized(update): return
+    parts = [x.strip() for x in " ".join(context.args).split("|", 1)]
+    if len(parts) != 2 or not all(parts):
+        await update.effective_message.reply_text("Uso: /etichette id_conversazione | tag1,tag2")
+        return
+    labels = [x.strip() for x in parts[1].split(",") if x.strip()]
+    await stage_change(update, {"action": "conversation_update", "payload": {"id": parts[0], "labels": labels}}, "Etichette conversazione preparate.")
+
+
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text):
     if not authorized(update):
         return
@@ -354,6 +429,11 @@ def main():
     app.add_handler(CommandHandler("prompt", prepare_prompt))
     app.add_handler(CommandHandler("topic", prepare_topic))
     app.add_handler(CommandHandler("invia", prepare_sales_send))
+    app.add_handler(CommandHandler("lead", prepare_lead))
+    app.add_handler(CommandHandler("canale", prepare_channel))
+    app.add_handler(CommandHandler("regola", prepare_rule))
+    app.add_handler(CommandHandler("stato", prepare_status))
+    app.add_handler(CommandHandler("etichette", prepare_labels))
     app.add_handler(CommandHandler("conferma", confirm))
     app.add_handler(CommandHandler("annulla", cancel))
     app.add_handler(MessageHandler(filters.VOICE, voice_message))
