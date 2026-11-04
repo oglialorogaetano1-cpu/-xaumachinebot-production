@@ -130,6 +130,8 @@ async def execute_change(change):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not authorized(update):
+        log.warning("Admin bot access denied for Telegram user %s", getattr(update.effective_user, "id", "unknown"))
+        await update.effective_message.reply_text("⛔ Questo bot e' riservato agli amministratori autorizzati.")
         return
     await update.effective_message.reply_text("✅ Console amministratore XAU Machine attiva. Scrivimi cosa vuoi controllare o modificare. Le modifiche richiedono sempre /conferma.")
 
@@ -203,7 +205,11 @@ async def photo_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     init_db()
-    app = Application.builder().token(TOKEN).build()
+    async def post_init(application):
+        me = await application.bot.get_me()
+        log.info("Admin Telegram bot connected: @%s; authorized IDs configured: %s", me.username, bool(ADMIN_IDS))
+
+    app = Application.builder().token(TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("conferma", confirm))
     app.add_handler(CommandHandler("annulla", cancel))
