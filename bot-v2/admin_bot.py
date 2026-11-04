@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import sqlite3
+import threading
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,6 +18,7 @@ from pathlib import Path
 import httpx
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+from health_server import start_health_server
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("xau-admin-bot")
@@ -220,6 +222,8 @@ async def photo_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     init_db()
+    log.info("Starting XAU Machine admin Telegram bot")
+    threading.Thread(target=start_health_server, name="health-server", daemon=True).start()
     async def post_init(application):
         me = await application.bot.get_me()
         log.info("Admin Telegram bot connected: @%s; authorized IDs configured: %s", me.username, bool(ADMIN_IDS))
@@ -231,7 +235,7 @@ def main():
     app.add_handler(MessageHandler(filters.VOICE, voice_message))
     app.add_handler(MessageHandler(filters.PHOTO, photo_message))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message))
-    app.run_polling()
+    app.run_polling(drop_pending_updates=False)
 
 
 if __name__ == "__main__":
