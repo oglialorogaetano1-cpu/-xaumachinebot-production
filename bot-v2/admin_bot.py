@@ -21,6 +21,10 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 from health_server import start_health_server
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+# HTTP client URLs include the Telegram bot token.  Keep transport logging out
+# of Railway logs while retaining the bot's own operational messages.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 log = logging.getLogger("xau-admin-bot")
 
 TOKEN = os.environ["ADMIN_BOT_TOKEN"]
