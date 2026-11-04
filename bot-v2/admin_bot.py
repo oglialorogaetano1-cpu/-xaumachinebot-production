@@ -27,6 +27,7 @@ SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 CRM_SECRET = os.environ["CRM_TRACKING_SECRET"]
 ADMIN_IDS = {item.strip() for item in os.environ.get("ADMIN_CHAT_ID", "").split(",") if item.strip()}
+BOOTSTRAP_CODE = os.environ.get("ADMIN_BOOTSTRAP_CODE", "")
 DB_PATH = Path(os.environ.get("ADMIN_MEMORY_DB", "/data/admin-bot.sqlite3"))
 
 SYSTEM = """Sei l'assistente amministratore privato del CRM XAU Machine.
@@ -50,6 +51,7 @@ def init_db():
         conn.execute("""CREATE TABLE IF NOT EXISTS audit (
             id INTEGER PRIMARY KEY, chat_id TEXT NOT NULL, action TEXT NOT NULL,
             payload TEXT NOT NULL, outcome TEXT NOT NULL, created_at TEXT NOT NULL)""")
+        conn.execute("CREATE TABLE IF NOT EXISTS admins (telegram_id TEXT PRIMARY KEY, created_at TEXT NOT NULL)")
         conn.commit()
 
 
@@ -71,7 +73,13 @@ def history(chat_id):
 
 
 def authorized(update):
-    return bool(update.effective_user and str(update.effective_user.id) in ADMIN_IDS)
+    if not update.effective_user:
+        return False
+    user_id = str(update.effective_user.id)
+    if user_id in ADMIN_IDS:
+        return True
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        return conn.execute("SELECT 1 FROM admins WHERE telegram_id=?", (user_id,)).fetchone() is not None
 
 
 async def openai_json(chat_id, text):
@@ -130,6 +138,13 @@ async def execute_change(change):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not authorized(update):
+        supplied = context.args[0] if context.args else ""
+        if BOOTSTRAP_CODE and supplied == BOOTSTRAP_CODE and update.effective_user:
+            with closing(sqlite3.connect(DB_PATH)) as conn:
+                conn.execute("INSERT OR IGNORE INTO admins(telegram_id,created_at) VALUES(?,?)", (str(update.effective_user.id), now()))
+                conn.commit()
+            await update.effective_message.reply_text("✅ Account amministratore collegato. Ora invia /start.")
+            return
         log.warning("Admin bot access denied for Telegram user %s", getattr(update.effective_user, "id", "unknown"))
         await update.effective_message.reply_text("⛔ Questo bot e' riservato agli amministratori autorizzati.")
         return
