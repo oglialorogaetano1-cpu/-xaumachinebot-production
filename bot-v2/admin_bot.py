@@ -42,13 +42,16 @@ analizzare prompt, conversazioni, topic, traduzioni e stato AI. Non inventare
 azioni riuscite: per ogni modifica proponi una sintesi precisa e chiedi
 conferma. Rispondi in JSON con chiavi reply e change. change e' null oppure un
 oggetto con action tra prompt_update, ai_control, topic_lookup, topic_update,
-sales_send, lead_create, lead_update, channel_create, followup_rule_create e
-conversation_update.
+sales_send, sales_broadcast, lead_create, lead_update, channel_create,
+followup_rule_create e conversation_update.
 Per prompt_update usa payload.content, name e language; per ai_control usa
 payload.chat_id e mode (on, off, pause_1h). Per topic_update usa
 telegram_user_id, telegram_chat_id, message_thread_id e topic_name. Per
 sales_send usa telegram_chat_id, conversation_id e body. Non inviare mai un
-messaggio al cliente senza far usare /conferma."""
+messaggio al cliente senza far usare /conferma. Quando l'amministratore chiede
+di contattare tutti i clienti senza deposito, usa sales_broadcast con
+payload.segment="not_deposited" e payload.body. Non usare sales_broadcast per
+un segmento diverso senza chiedere prima un chiarimento."""
 
 
 def init_db():
@@ -126,12 +129,29 @@ async def inspect_image(file_bytes, caption):
     return response.json().get("output_text", "Immagine ricevuta.")
 
 
+async def translate_sales_text(text, language):
+    """Translate a human-approved campaign while retaining its sales meaning."""
+    language = (language or "it").lower()
+    if language in {"it", "italian", "italiano"}:
+        return text
+    prompt = ("Translate the following approved sales message into " + language +
+              ". Return only the translated message. Preserve placeholders, URLs, "
+              "names and factual claims. Do not add promises, disclaimers, or commentary.\n\n" + text)
+    headers = {"Authorization": f"Bearer {OPENAI_KEY}", "Content-Type": "application/json"}
+    async with httpx.AsyncClient(timeout=45) as client:
+        response = await client.post("https://api.openai.com/v1/responses", headers=headers, json={"model": "gpt-4.1-mini", "input": prompt})
+    response.raise_for_status()
+    return (response.json().get("output_text") or text).strip()
+
+
 def supabase_headers():
     return {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}", "Content-Type": "application/json"}
 
 
 async def execute_change(change):
     action, payload = change.get("action"), change.get("payload") or {}
+    if action == "sales_broadcast":
+        return await execute_broadcast(payload)
     headers = supabase_headers()
     async with httpx.AsyncClient(timeout=20) as client:
         if action == "ai_control":
@@ -177,6 +197,54 @@ async def crm_get(path, params):
     return data if isinstance(data, list) else []
 
 
+async def broadcast_targets(segment):
+    if segment != "not_deposited":
+        raise ValueError("Segmento non supportato")
+    leads = await crm_get("crm_leads", {"select": "id,full_name,language,telegram_chat_id,telegram_user_id,deposit_total,status", "deposit_total": "eq.0", "limit": "500"})
+    conversations = await crm_get("crm_conversations", {"select": "id,lead_id", "limit": "1000"})
+    by_lead = {str(row.get("lead_id")): row.get("id") for row in conversations}
+    result = []
+    for lead in leads:
+        chat_id = lead.get("telegram_chat_id") or lead.get("telegram_user_id")
+        conversation_id = by_lead.get(str(lead.get("id")))
+        if chat_id and conversation_id:
+            result.append({"chat_id": str(chat_id), "conversation_id": conversation_id, "language": lead.get("language") or "it", "name": lead.get("full_name") or "Cliente"})
+    return result
+
+
+async def execute_broadcast(payload):
+    body = str(payload.get("body") or "").strip()
+    if not body:
+        return False, "Messaggio campagna mancante."
+    targets = await broadcast_targets(payload.get("segment"))
+    if not targets:
+        return False, "Nessun destinatario idoneo con conversazione Telegram disponibile."
+    if len(targets) > 500:
+        return False, "Segmento troppo grande: riduci il pubblico prima dell'invio."
+    headers = {**supabase_headers(), "Prefer": "return=minimal"}
+    translated = {}
+    sent, failed = 0, 0
+    async with httpx.AsyncClient(timeout=25) as client:
+        for target in targets:
+            try:
+                language = str(target["language"]).lower()
+                if language not in translated:
+                    translated[language] = await translate_sales_text(body, language)
+                message = translated[language]
+                queue = await client.post(f"{SUPABASE_URL}/rest/v1/crm_operator_outbox", headers=headers, json={"tenant_id": "00000000-0000-4000-8000-000000000001", "tenant_slug": "xau-machine", "telegram_chat_id": target["chat_id"], "body": message})
+                if queue.status_code >= 300:
+                    failed += 1
+                    continue
+                history = await client.post(f"{SUPABASE_URL}/rest/v1/crm_messages", headers=headers, json={"conversation_id": target["conversation_id"], "tenant_id": "00000000-0000-4000-8000-000000000001", "direction": "outbound", "sender_type": "human", "body": message})
+                if history.status_code >= 300:
+                    failed += 1
+                else:
+                    sent += 1
+            except Exception:
+                failed += 1
+    return (sent > 0), f"Campagna completata: {sent} inviati, {failed} da verificare."
+
+
 async def list_conversations(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not authorized(update):
         return
@@ -215,6 +283,32 @@ async def analyze_conversation(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.effective_message.reply_text("⚠️ Analisi conversazione non disponibile al momento.")
 
 
+async def briefing(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not authorized(update):
+        return
+    try:
+        leads, followups, conversations = await asyncio.gather(
+            crm_get("crm_leads", {"select": "id,status,deposit_total,created_at", "limit": "500"}),
+            crm_get("crm_followups", {"select": "id,scheduled_for,sent_at,cancelled_at", "sent_at": "is.null", "cancelled_at": "is.null", "limit": "500"}),
+            crm_get("crm_conversations", {"select": "id,last_message_at,ai_enabled", "order": "last_message_at.desc.nullslast", "limit": "500"}),
+        )
+        not_deposited = sum(1 for row in leads if float(row.get("deposit_total") or 0) <= 0)
+        ai_off = sum(1 for row in conversations if row.get("ai_enabled") is False)
+        latest = conversations[0].get("last_message_at") if conversations else "—"
+        text = ("📊 Briefing CRM\n"
+                f"• Lead totali: {len(leads)}\n"
+                f"• Senza deposito: {not_deposited}\n"
+                f"• Follow-up aperti: {len(followups)}\n"
+                f"• Conversazioni monitorate: {len(conversations)}\n"
+                f"• AI disattivata: {ai_off}\n"
+                f"• Ultima attività: {latest}\n\n"
+                "Prossima azione: chiedimi di analizzare una conversazione, oppure prepara una campagna per i non depositati.")
+        await update.effective_message.reply_text(text[:4000])
+    except Exception:
+        log.exception("CRM briefing unavailable")
+        await update.effective_message.reply_text("⚠️ Briefing CRM non disponibile in questo momento.")
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not authorized(update):
         supplied = context.args[0] if context.args else ""
@@ -227,7 +321,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log.warning("Admin bot access denied for Telegram user %s", getattr(update.effective_user, "id", "unknown"))
         await update.effective_message.reply_text("⛔ Questo bot e' riservato agli amministratori autorizzati.")
         return
-    await update.effective_message.reply_text("✅ Console amministratore XAU Machine attiva.\n\nCRM: /conversazioni · /analizza <id> · /lead nome | lingua | campagna | nota · /stato id | stato · /etichette conversazione | tag1,tag2\nAutomazioni: /regola nome | stato_lead | minuti | messaggio | canale\nCanali: /canale nome | url | lingua | codice | prodotto · /topic utente | chat | thread | nome\nAI/vendite: /prompt Nome | testo · /invia chat | conversazione | testo\n\nLe modifiche e gli invii richiedono sempre /conferma.")
+    await update.effective_message.reply_text("✅ Console amministratore XAU Machine attiva.\n\nDirezione: /briefing · /conversazioni · /analizza <id>\nCRM: /lead nome | lingua | campagna | nota · /stato id | stato · /etichette conversazione | tag1,tag2\nAutomazioni: /regola nome | stato_lead | minuti | messaggio | canale\nCanali: /canale nome | url | lingua | codice | prodotto · /topic utente | chat | thread | nome\nAI/vendite: /prompt Nome | testo · /invia chat | conversazione | testo · /nondepositati messaggio\n\nLe modifiche e gli invii richiedono sempre /conferma.")
 
 
 async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -310,6 +404,27 @@ async def prepare_sales_send(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await update.effective_message.reply_text("Messaggio sales preparato e non ancora inviato. Usa /conferma per inviarlo o /annulla.")
 
 
+async def prepare_non_deposit_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not authorized(update):
+        return
+    body = " ".join(context.args).strip()
+    if len(body) < 5:
+        await update.effective_message.reply_text("Uso: /nondepositati messaggio da inviare")
+        return
+    try:
+        targets = await broadcast_targets("not_deposited")
+    except Exception:
+        log.exception("Broadcast preview unavailable")
+        await update.effective_message.reply_text("⚠️ Non riesco a calcolare il segmento non depositati adesso.")
+        return
+    if not targets:
+        await update.effective_message.reply_text("Non ci sono clienti non depositati con una conversazione Telegram disponibile.")
+        return
+    preview = ", ".join(f"{x['name']} ({x['language']})" for x in targets[:5])
+    change = {"action": "sales_broadcast", "payload": {"segment": "not_deposited", "body": body}}
+    await stage_change(update, change, f"Campagna preparata per {len(targets)} non depositati. Lingua personalizzata per cliente. Anteprima: {preview}.")
+
+
 async def stage_change(update: Update, change, message):
     with closing(sqlite3.connect(DB_PATH)) as conn:
         conn.execute("INSERT OR REPLACE INTO pending_changes(chat_id,payload,created_at) VALUES(?,?,?)", (str(update.effective_chat.id), json.dumps(change), now())); conn.commit()
@@ -386,6 +501,17 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text):
     reply = str(result.get("reply") or "Ho analizzato la richiesta.")
     change = result.get("change")
     if isinstance(change, dict) and change.get("action"):
+        if change.get("action") == "sales_broadcast":
+            try:
+                targets = await broadcast_targets((change.get("payload") or {}).get("segment"))
+                if not targets:
+                    await update.effective_message.reply_text("Non ho trovato destinatari idonei: non ho preparato alcun invio.")
+                    return
+                reply += f"\n\nPubblico trovato: {len(targets)} clienti con conversazione Telegram."
+            except Exception:
+                log.exception("AI broadcast preview unavailable")
+                await update.effective_message.reply_text("⚠️ Non riesco a verificare il pubblico: non ho preparato alcun invio.")
+                return
         with closing(sqlite3.connect(DB_PATH)) as conn:
             conn.execute("INSERT OR REPLACE INTO pending_changes(chat_id,payload,created_at) VALUES(?,?,?)", (str(chat_id), json.dumps(change), now())); conn.commit()
         reply += "\n\nModifica preparata. Controlla il riepilogo e usa /conferma per applicarla oppure /annulla."
@@ -424,11 +550,13 @@ def main():
 
     app = Application.builder().token(TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("briefing", briefing))
     app.add_handler(CommandHandler("conversazioni", list_conversations))
     app.add_handler(CommandHandler("analizza", analyze_conversation))
     app.add_handler(CommandHandler("prompt", prepare_prompt))
     app.add_handler(CommandHandler("topic", prepare_topic))
     app.add_handler(CommandHandler("invia", prepare_sales_send))
+    app.add_handler(CommandHandler("nondepositati", prepare_non_deposit_broadcast))
     app.add_handler(CommandHandler("lead", prepare_lead))
     app.add_handler(CommandHandler("canale", prepare_channel))
     app.add_handler(CommandHandler("regola", prepare_rule))
