@@ -41,9 +41,13 @@ Parli italiano e assisti esclusivamente gli amministratori autorizzati. Puoi
 analizzare prompt, conversazioni, topic, traduzioni e stato AI. Non inventare
 azioni riuscite: per ogni modifica proponi una sintesi precisa e chiedi
 conferma. Rispondi in JSON con chiavi reply e change. change e' null oppure un
-oggetto con action tra prompt_update, ai_control, topic_lookup, translation_review.
+oggetto con action tra prompt_update, ai_control, topic_lookup, topic_update,
+sales_send e translation_review.
 Per prompt_update usa payload.content, name e language; per ai_control usa
-payload.chat_id e mode (on, off, pause_1h)."""
+payload.chat_id e mode (on, off, pause_1h). Per topic_update usa
+telegram_user_id, telegram_chat_id, message_thread_id e topic_name. Per
+sales_send usa telegram_chat_id, conversation_id e body. Non inviare mai un
+messaggio al cliente senza far usare /conferma."""
 
 
 def init_db():
@@ -134,12 +138,68 @@ async def execute_change(change):
         elif action == "topic_lookup":
             r = await client.post(f"{SUPABASE_URL}/rest/v1/rpc/crm_get_telegram_topic", headers=headers, json={"p_secret": CRM_SECRET, "p_tenant_slug": "xau-machine", "p_telegram_user_id": int(payload["telegram_user_id"])} )
         elif action == "prompt_update":
-            r = await client.post(f"{SUPABASE_URL}/rest/v1/rpc/crm_admin_save_prompt", headers=headers, json={"p_secret": CRM_SECRET, "p_tenant_slug": "xau-machine", "p_name": payload.get("name", "Prompt amministratore"), "p_language": payload.get("language", "it"), "p_content": payload["content"]})
+            r = await client.post(f"{SUPABASE_URL}/rest/v1/rpc/crm_save_master_prompt", headers=headers, json={"p_name": payload.get("name", "Prompt XAU Machine"), "p_content": payload["content"]})
+        elif action == "topic_update":
+            r = await client.post(f"{SUPABASE_URL}/rest/v1/rpc/crm_upsert_telegram_topic", headers=headers, json={"p_secret": CRM_SECRET, "p_tenant_slug": "xau-machine", "p_telegram_user_id": int(payload["telegram_user_id"]), "p_telegram_chat_id": int(payload["telegram_chat_id"]), "p_message_thread_id": int(payload["message_thread_id"]), "p_topic_name": payload["topic_name"]})
+        elif action == "sales_send":
+            chat_id = str(payload["telegram_chat_id"])
+            body = str(payload["body"])[:8000]
+            queued = await client.post(f"{SUPABASE_URL}/rest/v1/crm_operator_outbox", headers={**headers, "Prefer": "return=representation"}, json={"tenant_id": "00000000-0000-4000-8000-000000000001", "tenant_slug": "xau-machine", "telegram_chat_id": chat_id, "body": body})
+            if queued.status_code >= 300:
+                return False, f"Coda Telegram rifiutata ({queued.status_code})."
+            r = await client.post(f"{SUPABASE_URL}/rest/v1/crm_messages", headers=headers, json={"conversation_id": payload["conversation_id"], "tenant_id": "00000000-0000-4000-8000-000000000001", "direction": "outbound", "sender_type": "human", "body": body})
         else:
             return False, "Operazione non supportata in modo sicuro."
     if r.status_code >= 300:
         return False, f"CRM ha rifiutato l'operazione ({r.status_code})."
     return True, r.text[:1000]
+
+
+async def crm_get(path, params):
+    """Read CRM data using the bot's server-side credentials only."""
+    async with httpx.AsyncClient(timeout=20) as client:
+        r = await client.get(f"{SUPABASE_URL}/rest/v1/{path}", headers=supabase_headers(), params=params)
+    r.raise_for_status()
+    data = r.json()
+    return data if isinstance(data, list) else []
+
+
+async def list_conversations(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not authorized(update):
+        return
+    try:
+        rows = await crm_get("crm_conversations", {"select": "id,lead_id,last_message_at,ai_enabled,labels", "order": "last_message_at.desc.nullslast", "limit": "30"})
+        if not rows:
+            await update.effective_message.reply_text("Non trovo conversazioni disponibili.")
+            return
+        lines = ["💬 Ultime conversazioni (usa /analizza <id>):"]
+        for row in rows:
+            lines.append(f"• {row.get('id')} · lead {row.get('lead_id')} · {row.get('last_message_at') or 'senza messaggi'}")
+        await update.effective_message.reply_text("\n".join(lines)[:4000])
+    except Exception:
+        log.exception("Conversation list unavailable")
+        await update.effective_message.reply_text("⚠️ Non riesco a leggere le conversazioni dal CRM in questo momento.")
+
+
+async def analyze_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not authorized(update):
+        return
+    if not context.args:
+        await update.effective_message.reply_text("Uso: /analizza <id_conversazione>")
+        return
+    conversation_id = context.args[0]
+    try:
+        rows = await crm_get("crm_messages", {"select": "direction,sender_type,body,created_at", "conversation_id": f"eq.{conversation_id}", "order": "created_at.asc", "limit": "120"})
+        if not rows:
+            await update.effective_message.reply_text("Non trovo messaggi per questa conversazione.")
+            return
+        transcript = "\n".join(f"[{r.get('created_at','')}] {r.get('direction','')}/{r.get('sender_type','')}: {r.get('body','')}" for r in rows)
+        request = "Analizza questa conversazione CRM. Riporta: intenzione, stato lead, obiezioni, urgenza, prossima azione e una bozza di risposta sales etica (senza promesse o dati inventati). Non applicare modifiche.\n\n" + transcript[:30000]
+        result = await openai_json(update.effective_chat.id, request)
+        await update.effective_message.reply_text(str(result.get("reply") or "Analisi non disponibile.")[:4000])
+    except Exception:
+        log.exception("Conversation analysis unavailable")
+        await update.effective_message.reply_text("⚠️ Analisi conversazione non disponibile al momento.")
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -154,7 +214,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log.warning("Admin bot access denied for Telegram user %s", getattr(update.effective_user, "id", "unknown"))
         await update.effective_message.reply_text("⛔ Questo bot e' riservato agli amministratori autorizzati.")
         return
-    await update.effective_message.reply_text("✅ Console amministratore XAU Machine attiva. Scrivimi cosa vuoi controllare o modificare. Le modifiche richiedono sempre /conferma.")
+    await update.effective_message.reply_text("✅ Console amministratore XAU Machine attiva. Scrivimi cosa vuoi controllare o modificare.\n\nComandi: /conversazioni · /analizza <id> · /prompt Nome | testo · /topic utente | chat | thread | nome · /invia chat | conversazione | testo\n\nLe modifiche e gli invii richiedono sempre /conferma.")
 
 
 async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -180,6 +240,61 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with closing(sqlite3.connect(DB_PATH)) as conn:
             conn.execute("DELETE FROM pending_changes WHERE chat_id=?", (str(update.effective_chat.id),)); conn.commit()
         await update.effective_message.reply_text("Modifica annullata.")
+
+
+async def prepare_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not authorized(update):
+        return
+    raw = " ".join(context.args)
+    if "|" not in raw:
+        await update.effective_message.reply_text("Uso: /prompt Nome prompt | contenuto completo")
+        return
+    name, content = (part.strip() for part in raw.split("|", 1))
+    if len(content) < 20:
+        await update.effective_message.reply_text("Il prompt deve contenere almeno 20 caratteri.")
+        return
+    change = {"action": "prompt_update", "payload": {"name": name or "Prompt XAU Machine", "content": content}}
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.execute("INSERT OR REPLACE INTO pending_changes(chat_id,payload,created_at) VALUES(?,?,?)", (str(update.effective_chat.id), json.dumps(change), now())); conn.commit()
+    await update.effective_message.reply_text("Prompt preparato come nuova versione. Usa /conferma per salvarlo e attivarlo, oppure /annulla.")
+
+
+async def prepare_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not authorized(update):
+        return
+    raw = " ".join(context.args)
+    parts = [part.strip() for part in raw.split("|")]
+    if len(parts) != 4 or not all(parts):
+        await update.effective_message.reply_text("Uso: /topic telegram_user_id | telegram_chat_id | thread_id | nome topic")
+        return
+    try:
+        int(parts[0]); int(parts[1]); int(parts[2])
+    except ValueError:
+        await update.effective_message.reply_text("I primi tre valori devono essere ID numerici.")
+        return
+    change = {"action": "topic_update", "payload": {"telegram_user_id": parts[0], "telegram_chat_id": parts[1], "message_thread_id": parts[2], "topic_name": parts[3]}}
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.execute("INSERT OR REPLACE INTO pending_changes(chat_id,payload,created_at) VALUES(?,?,?)", (str(update.effective_chat.id), json.dumps(change), now())); conn.commit()
+    await update.effective_message.reply_text("Topic preparato. Usa /conferma per applicare la modifica.")
+
+
+async def prepare_sales_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not authorized(update):
+        return
+    raw = " ".join(context.args)
+    parts = [part.strip() for part in raw.split("|", 2)]
+    if len(parts) != 3 or not all(parts):
+        await update.effective_message.reply_text("Uso: /invia telegram_chat_id | id_conversazione | messaggio")
+        return
+    try:
+        int(parts[0])
+    except ValueError:
+        await update.effective_message.reply_text("telegram_chat_id deve essere numerico.")
+        return
+    change = {"action": "sales_send", "payload": {"telegram_chat_id": parts[0], "conversation_id": parts[1], "body": parts[2]}}
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.execute("INSERT OR REPLACE INTO pending_changes(chat_id,payload,created_at) VALUES(?,?,?)", (str(update.effective_chat.id), json.dumps(change), now())); conn.commit()
+    await update.effective_message.reply_text("Messaggio sales preparato e non ancora inviato. Usa /conferma per inviarlo o /annulla.")
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text):
@@ -234,6 +349,11 @@ def main():
 
     app = Application.builder().token(TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("conversazioni", list_conversations))
+    app.add_handler(CommandHandler("analizza", analyze_conversation))
+    app.add_handler(CommandHandler("prompt", prepare_prompt))
+    app.add_handler(CommandHandler("topic", prepare_topic))
+    app.add_handler(CommandHandler("invia", prepare_sales_send))
     app.add_handler(CommandHandler("conferma", confirm))
     app.add_handler(CommandHandler("annulla", cancel))
     app.add_handler(MessageHandler(filters.VOICE, voice_message))
