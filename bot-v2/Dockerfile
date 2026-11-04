@@ -3,6 +3,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY app.py .
+COPY admin_bot.py .
 COPY health_server.py .
 COPY assets/ ./assets/
 EXPOSE 8080
