@@ -99,6 +99,21 @@ def authorized(update):
         return conn.execute("SELECT 1 FROM admins WHERE telegram_id=?", (user_id,)).fetchone() is not None
 
 
+def response_text(data):
+    """Support both compact and full Responses API payload shapes."""
+    if data.get("output_text"):
+        return str(data["output_text"])
+    chunks = []
+    for item in data.get("output") or []:
+        for content in item.get("content") or []:
+            text = content.get("text")
+            if isinstance(text, str):
+                chunks.append(text)
+            elif isinstance(text, dict) and isinstance(text.get("value"), str):
+                chunks.append(text["value"])
+    return "\n".join(chunks)
+
+
 async def openai_json(chat_id, text):
     items = [{"role": "developer", "content": SYSTEM}]
     items += history(chat_id)
@@ -109,7 +124,7 @@ async def openai_json(chat_id, text):
         response = await client.post("https://api.openai.com/v1/responses", headers=headers, json=payload)
     response.raise_for_status()
     data = response.json()
-    raw = data.get("output_text") or "{}"
+    raw = response_text(data) or "{}"
     return json.loads(raw)
 
 
@@ -126,7 +141,7 @@ async def openai_text(text):
     async with httpx.AsyncClient(timeout=60) as client:
         response = await client.post("https://api.openai.com/v1/responses", headers=headers, json=payload)
     response.raise_for_status()
-    return (response.json().get("output_text") or "").strip()
+    return response_text(response.json()).strip()
 
 
 async def transcribe(file_bytes, filename):
@@ -523,7 +538,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text):
             reply = await openai_text(text)
         except Exception:
             log.exception("AI conversational fallback unavailable")
-            reply = "Sono qui. Posso aiutarti con CRM, conversazioni, lead, prompt, canali, follow-up e campagne. Dimmi cosa vuoi fare."
+    if not reply:
+        reply = "Sono qui. Posso aiutarti con CRM, conversazioni, lead, prompt, canali, follow-up e campagne. Dimmi cosa vuoi fare."
     change = result.get("change")
     if isinstance(change, dict) and change.get("action"):
         if change.get("action") == "sales_broadcast":
