@@ -32,6 +32,7 @@ OPENAI_KEY = os.environ["ADMIN_OPENAI_API_KEY"]
 SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 CRM_SECRET = os.environ["CRM_TRACKING_SECRET"]
+SUPPORT_FORUM_CHAT_ID = os.environ.get("SUPPORT_FORUM_CHAT_ID", "").strip()
 ADMIN_IDS = {item.strip() for item in os.environ.get("ADMIN_CHAT_ID", "").split(",") if item.strip()}
 BOOTSTRAP_CODE = os.environ.get("ADMIN_BOOTSTRAP_CODE", "")
 DB_PATH = Path(os.environ.get("ADMIN_MEMORY_DB", "/data/admin-bot.sqlite3"))
@@ -209,20 +210,34 @@ def supabase_headers():
     return {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}", "Content-Type": "application/json"}
 
 
+async def support_forum_id():
+    if SUPPORT_FORUM_CHAT_ID:
+        return SUPPORT_FORUM_CHAT_ID
+    async with httpx.AsyncClient(timeout=12) as client:
+        r = await client.post(f"{SUPABASE_URL}/rest/v1/rpc/crm_get_telegram_forum", headers=supabase_headers(), json={"p_secret": CRM_SECRET, "p_tenant_slug": "xau-machine"})
+    if r.status_code >= 300:
+        return ""
+    data = r.json() or {}
+    return str(data.get("forum_chat_id") or "") if isinstance(data, dict) else ""
+
+
 async def execute_change(change):
     action, payload = change.get("action"), change.get("payload") or {}
     if action == "sales_broadcast":
         return await execute_broadcast(payload)
+    forum_id = await support_forum_id() if action in {"topic_lookup", "topic_update"} else ""
+    if action in {"topic_lookup", "topic_update"} and not forum_id:
+        return False, "Gruppo Topic non configurato nel CRM."
     headers = supabase_headers()
     async with httpx.AsyncClient(timeout=20) as client:
         if action == "ai_control":
             r = await client.post(f"{SUPABASE_URL}/rest/v1/rpc/crm_set_ai_control", headers=headers, json={"p_secret": CRM_SECRET, "p_tenant_slug": "xau-machine", "p_telegram_chat_id": int(payload["chat_id"]), "p_mode": payload["mode"]})
         elif action == "topic_lookup":
-            r = await client.post(f"{SUPABASE_URL}/rest/v1/rpc/crm_get_telegram_topic", headers=headers, json={"p_secret": CRM_SECRET, "p_tenant_slug": "xau-machine", "p_telegram_user_id": int(payload["telegram_user_id"])} )
+            r = await client.post(f"{SUPABASE_URL}/rest/v1/rpc/crm_get_telegram_topic", headers=headers, json={"p_secret": CRM_SECRET, "p_tenant_slug": "xau-machine", "p_forum_chat_id": int(forum_id), "p_telegram_user_id": int(payload.get("telegram_user_id")) if payload.get("telegram_user_id") else None, "p_message_thread_id": int(payload.get("message_thread_id")) if payload.get("message_thread_id") else None} )
         elif action == "prompt_update":
             r = await client.post(f"{SUPABASE_URL}/rest/v1/rpc/crm_save_master_prompt", headers=headers, json={"p_name": payload.get("name", "Prompt XAU Machine"), "p_content": payload["content"]})
         elif action == "topic_update":
-            r = await client.post(f"{SUPABASE_URL}/rest/v1/rpc/crm_upsert_telegram_topic", headers=headers, json={"p_secret": CRM_SECRET, "p_tenant_slug": "xau-machine", "p_telegram_user_id": int(payload["telegram_user_id"]), "p_telegram_chat_id": int(payload["telegram_chat_id"]), "p_message_thread_id": int(payload["message_thread_id"]), "p_topic_name": payload["topic_name"]})
+            r = await client.post(f"{SUPABASE_URL}/rest/v1/rpc/crm_upsert_telegram_topic", headers=headers, json={"p_secret": CRM_SECRET, "p_tenant_slug": "xau-machine", "p_telegram_user_id": int(payload["telegram_user_id"]), "p_telegram_chat_id": int(payload["telegram_chat_id"]), "p_forum_chat_id": int(forum_id), "p_message_thread_id": int(payload["message_thread_id"]), "p_topic_name": payload["topic_name"]})
         elif action == "sales_send":
             chat_id = str(payload["telegram_chat_id"])
             body = str(payload["body"])[:8000]
@@ -382,7 +397,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log.warning("Admin bot access denied for Telegram user %s", getattr(update.effective_user, "id", "unknown"))
         await update.effective_message.reply_text("⛔ Questo bot e' riservato agli amministratori autorizzati.")
         return
-    await update.effective_message.reply_text("✅ Console amministratore XAU Machine attiva.\n\nDirezione: /briefing · /conversazioni · /analizza <id>\nCRM: /lead nome | lingua | campagna | nota · /stato id | stato · /etichette conversazione | tag1,tag2\nAutomazioni: /regola nome | stato_lead | minuti | messaggio | canale\nCanali: /canale nome | url | lingua | codice | prodotto · /topic utente | chat | thread | nome\nAI/vendite: /prompt Nome | testo · invia un file .txt per importare un prompt · /invia chat | conversazione | testo · /nondepositati messaggio\n\nLe modifiche e gli invii richiedono sempre /conferma.")
+    await update.effective_message.reply_text("✅ Console amministratore XAU Machine attiva.\n\nDirezione: /briefing · /conversazioni · /analizza <id>\nCRM: /lead nome | lingua | campagna | nota · /stato id | stato · /etichette conversazione | tag1,tag2\nAutomazioni: /regola nome | stato_lead | minuti | messaggio | canale\nCanali e topic: /canale nome | url | lingua | codice | prodotto · /argomento utente:ID o thread:ID · /topic utente | chat | thread | nome\nAI/vendite: /prompt Nome | testo · invia un file .txt per importare un prompt · /invia chat | conversazione | testo · /nondepositati messaggio\n\nLe modifiche e gli invii richiedono sempre /conferma.")
 
 
 async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -448,6 +463,37 @@ async def prepare_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with closing(sqlite3.connect(DB_PATH)) as conn:
         conn.execute("INSERT OR REPLACE INTO pending_changes(chat_id,payload,created_at) VALUES(?,?,?)", (str(update.effective_chat.id), json.dumps(change), now())); conn.commit()
     await update.effective_message.reply_text("Topic preparato. Usa /conferma per applicare la modifica.")
+
+
+async def topic_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not authorized(update):
+        return
+    if not context.args:
+        await update.effective_message.reply_text("Uso: /argomento utente:<telegram_user_id> oppure /argomento thread:<thread_id>")
+        return
+    try:
+        kind, value = context.args[0].split(":", 1)
+        value = int(value)
+    except ValueError:
+        await update.effective_message.reply_text("Formato non valido. Esempio: /argomento utente:123456")
+        return
+    if kind not in {"utente", "thread"}:
+        await update.effective_message.reply_text("Usa utente:ID oppure thread:ID.")
+        return
+    ok, detail = await execute_change({"action": "topic_lookup", "payload": {"telegram_user_id": value if kind == "utente" else None, "message_thread_id": value if kind == "thread" else None}})
+    if not ok:
+        await update.effective_message.reply_text("⚠️ Topic non disponibile: " + detail)
+        return
+    try:
+        data = json.loads(detail)
+    except (TypeError, json.JSONDecodeError):
+        data = {}
+    if not data:
+        await update.effective_message.reply_text("Nessun topic collegato a questo riferimento.")
+        return
+    lines = ["🧵 Topic CRM collegato:"]
+    lines.extend(f"• {key}: {value}" for key, value in data.items())
+    await update.effective_message.reply_text("\n".join(lines)[:3900])
 
 
 async def prepare_sales_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -665,6 +711,7 @@ def main():
     app.add_handler(CommandHandler("analizza", analyze_conversation))
     app.add_handler(CommandHandler("prompt", prepare_prompt))
     app.add_handler(CommandHandler("topic", prepare_topic))
+    app.add_handler(CommandHandler("argomento", topic_info))
     app.add_handler(CommandHandler("invia", prepare_sales_send))
     app.add_handler(CommandHandler("nondepositati", prepare_non_deposit_broadcast))
     app.add_handler(CommandHandler("lead", prepare_lead))
