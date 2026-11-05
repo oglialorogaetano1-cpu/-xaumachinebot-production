@@ -51,7 +51,10 @@ sales_send usa telegram_chat_id, conversation_id e body. Non inviare mai un
 messaggio al cliente senza far usare /conferma. Quando l'amministratore chiede
 di contattare tutti i clienti senza deposito, usa sales_broadcast con
 payload.segment="not_deposited" e payload.body. Non usare sales_broadcast per
-un segmento diverso senza chiedere prima un chiarimento."""
+un segmento diverso senza chiedere prima un chiarimento. reply e' obbligatorio:
+deve essere una risposta conversazionale utile e completa alla domanda, mai
+una frase generica come "Ho analizzato la richiesta". Se non serve una modifica,
+imposta change a null ma rispondi comunque in modo concreto."""
 
 
 def init_db():
@@ -108,6 +111,22 @@ async def openai_json(chat_id, text):
     data = response.json()
     raw = data.get("output_text") or "{}"
     return json.loads(raw)
+
+
+async def openai_text(text):
+    """Plain-language fallback when the structured planner omits its reply."""
+    payload = {
+        "model": "gpt-4.1-mini",
+        "input": [
+            {"role": "developer", "content": "Sei l'assistente amministratore XAU Machine. Rispondi in italiano in modo naturale, concreto e utile. Non dire che hai analizzato una richiesta; rispondi direttamente. Non affermare di aver effettuato modifiche o invii."},
+            {"role": "user", "content": text},
+        ],
+    }
+    headers = {"Authorization": f"Bearer {OPENAI_KEY}", "Content-Type": "application/json"}
+    async with httpx.AsyncClient(timeout=60) as client:
+        response = await client.post("https://api.openai.com/v1/responses", headers=headers, json=payload)
+    response.raise_for_status()
+    return (response.json().get("output_text") or "").strip()
 
 
 async def transcribe(file_bytes, filename):
@@ -498,7 +517,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text):
         log.exception("AI admin unavailable")
         await update.effective_message.reply_text("⚠️ Assistente AI non disponibile; la modifica non è stata eseguita.")
         return
-    reply = str(result.get("reply") or "Ho analizzato la richiesta.")
+    reply = str(result.get("reply") or result.get("message") or result.get("answer") or "").strip()
+    if not reply:
+        try:
+            reply = await openai_text(text)
+        except Exception:
+            log.exception("AI conversational fallback unavailable")
+            reply = "Sono qui. Posso aiutarti con CRM, conversazioni, lead, prompt, canali, follow-up e campagne. Dimmi cosa vuoi fare."
     change = result.get("change")
     if isinstance(change, dict) and change.get("action"):
         if change.get("action") == "sales_broadcast":
