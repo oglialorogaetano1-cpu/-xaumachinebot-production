@@ -54,7 +54,11 @@ payload.segment="not_deposited" e payload.body. Non usare sales_broadcast per
 un segmento diverso senza chiedere prima un chiarimento. reply e' obbligatorio:
 deve essere una risposta conversazionale utile e completa alla domanda, mai
 una frase generica come "Ho analizzato la richiesta". Se non serve una modifica,
-imposta change a null ma rispondi comunque in modo concreto."""
+imposta change a null ma rispondi comunque in modo concreto. Prepara una
+modifica soltanto se l'amministratore l'ha richiesta in modo esplicito e i
+parametri necessari sono completi. Non dichiarare mai di non avere accesso alle
+conversazioni CRM: per analizzarne una, guida l'amministratore a usare
+/conversazioni e /analizza <id> quando manca l'identificativo."""
 
 
 def init_db():
@@ -112,6 +116,29 @@ def response_text(data):
             elif isinstance(text, dict) and isinstance(text.get("value"), str):
                 chunks.append(text["value"])
     return "\n".join(chunks)
+
+
+def valid_change(change):
+    """Never stage an incomplete AI proposal that could fail on confirmation."""
+    if not isinstance(change, dict) or not change.get("action"):
+        return False, ""
+    payload = change.get("payload") or {}
+    required = {
+        "prompt_update": ("content",),
+        "ai_control": ("chat_id", "mode"),
+        "topic_update": ("telegram_user_id", "telegram_chat_id", "message_thread_id", "topic_name"),
+        "sales_send": ("telegram_chat_id", "conversation_id", "body"),
+        "sales_broadcast": ("segment", "body"),
+        "lead_create": ("full_name",),
+        "lead_update": ("id",),
+        "channel_create": ("name", "telegram_url", "campaign_code"),
+        "followup_rule_create": ("name", "message_template"),
+        "conversation_update": ("id",),
+    }
+    missing = [key for key in required.get(change.get("action"), ()) if not str(payload.get(key) or "").strip()]
+    if missing:
+        return False, ", ".join(missing)
+    return True, ""
 
 
 async def openai_json(chat_id, text):
@@ -368,7 +395,11 @@ async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text("Non ci sono modifiche in attesa.")
         return
     change = json.loads(row[0])
-    ok, detail = await execute_change(change)
+    is_valid, missing = valid_change(change)
+    if is_valid:
+        ok, detail = await execute_change(change)
+    else:
+        ok, detail = False, "Bozza incompleta annullata: mancano " + missing + "."
     with closing(sqlite3.connect(DB_PATH)) as conn:
         conn.execute("DELETE FROM pending_changes WHERE chat_id=?", (chat_id,))
         conn.execute("INSERT INTO audit(chat_id,action,payload,outcome,created_at) VALUES(?,?,?,?,?)", (chat_id, change.get("action", ""), json.dumps(change), "ok" if ok else detail, now()))
@@ -541,6 +572,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text):
     if not reply:
         reply = "Sono qui. Posso aiutarti con CRM, conversazioni, lead, prompt, canali, follow-up e campagne. Dimmi cosa vuoi fare."
     change = result.get("change")
+    if isinstance(change, dict) and change.get("action"):
+        is_valid, missing = valid_change(change)
+        if not is_valid:
+            reply += "\n\nNon ho preparato alcuna modifica: mancano dati necessari (" + missing + ")."
+            change = None
     if isinstance(change, dict) and change.get("action"):
         if change.get("action") == "sales_broadcast":
             try:
