@@ -355,7 +355,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log.warning("Admin bot access denied for Telegram user %s", getattr(update.effective_user, "id", "unknown"))
         await update.effective_message.reply_text("⛔ Questo bot e' riservato agli amministratori autorizzati.")
         return
-    await update.effective_message.reply_text("✅ Console amministratore XAU Machine attiva.\n\nDirezione: /briefing · /conversazioni · /analizza <id>\nCRM: /lead nome | lingua | campagna | nota · /stato id | stato · /etichette conversazione | tag1,tag2\nAutomazioni: /regola nome | stato_lead | minuti | messaggio | canale\nCanali: /canale nome | url | lingua | codice | prodotto · /topic utente | chat | thread | nome\nAI/vendite: /prompt Nome | testo · /invia chat | conversazione | testo · /nondepositati messaggio\n\nLe modifiche e gli invii richiedono sempre /conferma.")
+    await update.effective_message.reply_text("✅ Console amministratore XAU Machine attiva.\n\nDirezione: /briefing · /conversazioni · /analizza <id>\nCRM: /lead nome | lingua | campagna | nota · /stato id | stato · /etichette conversazione | tag1,tag2\nAutomazioni: /regola nome | stato_lead | minuti | messaggio | canale\nCanali: /canale nome | url | lingua | codice | prodotto · /topic utente | chat | thread | nome\nAI/vendite: /prompt Nome | testo · invia un file .txt per importare un prompt · /invia chat | conversazione | testo · /nondepositati messaggio\n\nLe modifiche e gli invii richiedono sempre /conferma.")
 
 
 async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -581,6 +581,39 @@ async def photo_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await handle_text(update, context, "Analisi immagine ricevuta:\n" + text)
 
 
+async def prompt_txt_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Stage a UTF-8 text file as a new CRM prompt version; never execute it."""
+    if not authorized(update):
+        return
+    document = update.effective_message.document
+    if not document:
+        return
+    filename = document.file_name or "prompt.txt"
+    if not filename.lower().endswith(".txt"):
+        await update.effective_message.reply_text("Invia un file .txt per importare un prompt.")
+        return
+    if document.file_size and document.file_size > 1_000_000:
+        await update.effective_message.reply_text("Il file supera 1 MB: invia un prompt più piccolo.")
+        return
+    try:
+        telegram_file = await document.get_file()
+        raw = bytes(await telegram_file.download_as_bytearray())
+        content = raw.decode("utf-8-sig").strip()
+    except UnicodeDecodeError:
+        await update.effective_message.reply_text("Il file deve essere testo UTF-8.")
+        return
+    except Exception:
+        log.exception("TXT prompt download failed")
+        await update.effective_message.reply_text("⚠️ Non riesco a leggere il file TXT.")
+        return
+    if len(content) < 20:
+        await update.effective_message.reply_text("Il file è vuoto o troppo corto per essere un prompt.")
+        return
+    prompt_name = Path(filename).stem.replace("_", " ")[:120]
+    change = {"action": "prompt_update", "payload": {"name": prompt_name, "content": content}}
+    await stage_change(update, change, f"📄 Prompt '{prompt_name}' letto ({len(content):,} caratteri). Nuova versione pronta:")
+
+
 def main():
     init_db()
     log.info("Starting XAU Machine admin Telegram bot")
@@ -607,6 +640,7 @@ def main():
     app.add_handler(CommandHandler("annulla", cancel))
     app.add_handler(MessageHandler(filters.VOICE, voice_message))
     app.add_handler(MessageHandler(filters.PHOTO, photo_message))
+    app.add_handler(MessageHandler(filters.Document.ALL, prompt_txt_message))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message))
     app.run_polling(drop_pending_updates=False)
 
