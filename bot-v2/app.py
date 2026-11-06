@@ -835,6 +835,11 @@ async def mirror_text_to_forum(update: Update, direction: str, body: str,
             await crm_store_language_code(update, detected_language)
         if translated and italian.casefold() != topic_body.casefold():
             topic_body = f"{topic_body}\n\n🇮🇹 Italiano: {italian}"
+        log.info(
+            "Traduzione Topic cliente: eseguita=%s lingua_rilevata=%s",
+            translated,
+            detected_language or "non_rilevata",
+        )
     try:
         await update.get_bot().send_message(
             chat_id=int(forum_chat_id),
@@ -952,9 +957,9 @@ async def forum_operator_message(update: Update, context: ContextTypes.DEFAULT_T
                 )
             body = msg.caption or "Allegato inviato dall'operatore"
         await crm_record_forum_reply(mapping, body)
-        pause = await crm_set_ai_control(int(mapping["telegram_chat_id"]), "pause_1h")
-        if pause.get("ok"):
-            await msg.reply_text("⏸ IA in pausa per 1 ora. /stop per fermarla, /accendi per riattivarla.")
+        stopped = await crm_set_ai_control(int(mapping["telegram_chat_id"]), "stop")
+        if stopped.get("ok"):
+            await msg.reply_text("⛔ IA spenta per questo cliente. Scrivi /accendi nel Topic per riattivarla.")
     except Exception as exc:
         log.warning("Risposta Topic -> cliente fallita: %s", exc)
         await msg.reply_text("⚠️ Invio al cliente non riuscito. Riprova tra poco.")
