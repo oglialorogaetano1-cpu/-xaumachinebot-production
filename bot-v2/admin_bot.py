@@ -245,6 +245,7 @@ async def execute_change(change):
                     "p_tenant_slug": "xau-machine",
                     "p_name": payload.get("name", "Prompt XAU Machine"),
                     "p_content": payload["content"],
+                    "p_replace": bool(payload.get("replace", False)),
                 },
             )
         elif action == "topic_update":
@@ -703,7 +704,9 @@ async def prompt_txt_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.effective_message.reply_text("Il file è vuoto o troppo corto per essere un prompt.")
         return
     prompt_name = Path(filename).stem.replace("_", " ")[:120]
-    change = {"action": "prompt_update", "payload": {"name": prompt_name, "content": content}}
+    # A TXT import is the one explicit operation that can replace the whole
+    # prompt. Conversational Telegram edits are always cumulative.
+    change = {"action": "prompt_update", "payload": {"name": prompt_name, "content": content, "replace": True}}
     await stage_change(update, change, f"📄 Prompt '{prompt_name}' letto ({len(content):,} caratteri). Nuova versione pronta:")
 
 
