@@ -409,7 +409,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log.warning("Admin bot access denied for Telegram user %s", getattr(update.effective_user, "id", "unknown"))
         await update.effective_message.reply_text("⛔ Questo bot e' riservato agli amministratori autorizzati.")
         return
-    await update.effective_message.reply_text("✅ Console amministratore XAU Machine attiva.\n\nDirezione: /briefing · /conversazioni · /analizza <id>\nCRM: /lead nome | lingua | campagna | nota · /stato id | stato · /etichette conversazione | tag1,tag2\nAutomazioni: /regola nome | stato_lead | minuti | messaggio | canale\nCanali e topic: /canale nome | url | lingua | codice | prodotto · /argomento utente:ID o thread:ID · /topic utente | chat | thread | nome\nAI/vendite: /prompt Nome | testo · invia un file .txt per importare un prompt · /invia chat | conversazione | testo · /nondepositati messaggio\n\nLe modifiche e gli invii richiedono sempre /conferma.")
+    await update.effective_message.reply_text("✅ Console amministratore XAU Machine attiva.\n\nDirezione: /briefing · /conversazioni · /analizza <id>\nCRM: /lead nome | lingua | campagna | nota · /stato id | stato · /etichette conversazione | tag1,tag2\nAutomazioni: /regola nome | stato_lead | minuti | messaggio | canale\nCanali e topic: /canale nome | url | lingua | codice | prodotto · /argomento utente:ID o thread:ID · /topic utente | chat | thread | nome\nAI/vendite: /prompt Nome | testo · invia un file .txt per importare un prompt · /invia chat | conversazione | testo · /nondepositati messaggio\nRipristino: /ripristina_telegram recupera le modifiche ai prompt confermate oggi.\n\nLe modifiche e gli invii richiedono sempre /conferma.")
 
 
 async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -710,6 +710,46 @@ async def prompt_txt_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await stage_change(update, change, f"📄 Prompt '{prompt_name}' letto ({len(content):,} caratteri). Nuova versione pronta:")
 
 
+async def restore_today_telegram_prompt_updates(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Recover every distinct prompt instruction confirmed today from the local audit log."""
+    if not authorized(update):
+        return
+    start_rome = datetime.now(ROME).replace(hour=0, minute=0, second=0, microsecond=0)
+    start_utc = start_rome.astimezone(timezone.utc).isoformat()
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        rows = conn.execute(
+            "SELECT payload,created_at,outcome FROM audit WHERE action='prompt_update' AND created_at>=? ORDER BY id ASC",
+            (start_utc,),
+        ).fetchall()
+    instructions, seen, skipped_imports = [], set(), 0
+    for raw_payload, created_at, outcome in rows:
+        try:
+            payload = json.loads(raw_payload).get("payload") or {}
+            content = str(payload.get("content") or "").strip()
+        except (json.JSONDecodeError, AttributeError):
+            continue
+        if payload.get("replace"):
+            skipped_imports += 1
+            continue
+        fingerprint = " ".join(content.split()).lower()
+        if len(content) >= 20 and fingerprint not in seen:
+            seen.add(fingerprint)
+            instructions.append(f"• {content}")
+    if not instructions:
+        await update.effective_message.reply_text(
+            "Non trovo modifiche Telegram recuperabili ai prompt per oggi. I file TXT completi restano separati e non vengono fusi automaticamente."
+        )
+        return
+    recovered = "Recupero delle modifiche Telegram confermate oggi:\n" + "\n".join(instructions)
+    change = {"action": "prompt_update", "payload": {
+        "name": f"Recupero Telegram {datetime.now(ROME).date().isoformat()}",
+        "content": recovered,
+        "replace": False,
+    }}
+    extra = f" Ho lasciato separati {skipped_imports} import TXT completi." if skipped_imports else ""
+    await stage_change(update, change, f"♻️ Ho recuperato {len(instructions)} modifiche Telegram distinte di oggi.{extra}")
+
+
 def admin_recipients():
     recipients = set(ADMIN_IDS)
     with closing(sqlite3.connect(DB_PATH)) as conn:
@@ -803,6 +843,7 @@ def main():
     app.add_handler(CommandHandler("conversazioni", list_conversations))
     app.add_handler(CommandHandler("analizza", analyze_conversation))
     app.add_handler(CommandHandler("prompt", prepare_prompt))
+    app.add_handler(CommandHandler("ripristina_telegram", restore_today_telegram_prompt_updates))
     app.add_handler(CommandHandler("topic", prepare_topic))
     app.add_handler(CommandHandler("argomento", topic_info))
     app.add_handler(CommandHandler("invia", prepare_sales_send))
