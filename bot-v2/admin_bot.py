@@ -235,7 +235,16 @@ async def execute_change(change):
         elif action == "topic_lookup":
             r = await client.post(f"{SUPABASE_URL}/rest/v1/rpc/crm_get_telegram_topic", headers=headers, json={"p_secret": CRM_SECRET, "p_tenant_slug": "xau-machine", "p_forum_chat_id": int(forum_id), "p_telegram_user_id": int(payload.get("telegram_user_id")) if payload.get("telegram_user_id") else None, "p_message_thread_id": int(payload.get("message_thread_id")) if payload.get("message_thread_id") else None} )
         elif action == "prompt_update":
-            r = await client.post(f"{SUPABASE_URL}/rest/v1/rpc/crm_save_master_prompt", headers=headers, json={"p_name": payload.get("name", "Prompt XAU Machine"), "p_content": payload["content"]})
+            r = await client.post(
+                f"{SUPABASE_URL}/rest/v1/rpc/crm_save_master_prompt_from_telegram",
+                headers=headers,
+                json={
+                    "p_secret": CRM_SECRET,
+                    "p_tenant_slug": "xau-machine",
+                    "p_name": payload.get("name", "Prompt XAU Machine"),
+                    "p_content": payload["content"],
+                },
+            )
         elif action == "topic_update":
             r = await client.post(f"{SUPABASE_URL}/rest/v1/rpc/crm_upsert_telegram_topic", headers=headers, json={"p_secret": CRM_SECRET, "p_tenant_slug": "xau-machine", "p_telegram_user_id": int(payload["telegram_user_id"]), "p_telegram_chat_id": int(payload["telegram_chat_id"]), "p_forum_chat_id": int(forum_id), "p_message_thread_id": int(payload["message_thread_id"]), "p_topic_name": payload["topic_name"]})
         elif action == "sales_send":
