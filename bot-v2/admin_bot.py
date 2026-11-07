@@ -12,8 +12,9 @@ import os
 import sqlite3
 import threading
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import httpx
 from telegram import Update
@@ -36,6 +37,7 @@ SUPPORT_FORUM_CHAT_ID = os.environ.get("SUPPORT_FORUM_CHAT_ID", "").strip()
 ADMIN_IDS = {item.strip() for item in os.environ.get("ADMIN_CHAT_ID", "").split(",") if item.strip()}
 BOOTSTRAP_CODE = os.environ.get("ADMIN_BOOTSTRAP_CODE", "")
 DB_PATH = Path(os.environ.get("ADMIN_MEMORY_DB", "/data/admin-bot.sqlite3"))
+ROME = ZoneInfo("Europe/Rome")
 
 SYSTEM = """Sei l'assistente amministratore privato del CRM XAU Machine.
 Parli italiano e assisti esclusivamente gli amministratori autorizzati. Puoi
@@ -705,6 +707,84 @@ async def prompt_txt_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await stage_change(update, change, f"📄 Prompt '{prompt_name}' letto ({len(content):,} caratteri). Nuova versione pronta:")
 
 
+def admin_recipients():
+    recipients = set(ADMIN_IDS)
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        recipients.update(row[0] for row in conn.execute("SELECT telegram_id FROM admins"))
+    return recipients
+
+
+async def improvement_recap(application, weekly=False):
+    """Review recent customer conversations and stage—never apply—a prompt improvement."""
+    hours = 168 if weekly else 24
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    try:
+        messages = await crm_get("crm_messages", {
+            "select": "conversation_id,direction,sender_type,body,created_at",
+            "created_at": f"gte.{cutoff}",
+            "order": "created_at.asc",
+            "limit": "1000",
+        })
+    except Exception:
+        log.exception("Continuous improvement read failed")
+        return
+    if not messages:
+        return
+    transcript = "\n".join(
+        f"[{row.get('created_at','')}] {row.get('conversation_id','')} "
+        f"{row.get('direction','')}/{row.get('sender_type','')}: "
+        f"{str(row.get('body') or '')[:600]}"
+        for row in messages
+    )[:100000]
+    cadence = "settimanale" if weekly else "giornaliero"
+    request = (
+        f"Crea un recap {cadence} per l'amministratore del customer service trading "
+        f"su {len(messages)} messaggi delle ultime {hours} ore. Individua domande ricorrenti, "
+        "dubbi, obiezioni, qualità delle risposte e ostacoli che rallentano iscrizione o deposito. "
+        "Suggerisci una sola istruzione breve, concreta e conforme da aggiungere al prompt. "
+        "Non fare promesse di rendimento, non esercitare pressione e non fornire consulenza finanziaria. "
+        "Rispondi ESATTAMENTE in JSON con recap e prompt_instruction; prompt_instruction deve avere 20-800 caratteri.\n\n"
+        + transcript
+    )
+    try:
+        result = await openai_json("continuous-improvement", request)
+        recap = str(result.get("recap") or result.get("reply") or "Recap non disponibile.").strip()
+        instruction = str(result.get("prompt_instruction") or "").strip()
+    except Exception:
+        log.exception("Continuous improvement AI analysis failed")
+        return
+    if len(instruction) >= 20:
+        change = {"action": "prompt_update", "payload": {
+            "name": f"Miglioramento {cadence} {datetime.now(ROME).date().isoformat()}",
+            "content": instruction,
+        }}
+    else:
+        change = None
+    for chat_id in admin_recipients():
+        if change:
+            with closing(sqlite3.connect(DB_PATH)) as conn:
+                conn.execute("INSERT OR REPLACE INTO pending_changes(chat_id,payload,created_at) VALUES(?,?,?)", (str(chat_id), json.dumps(change), now()))
+                conn.commit()
+        suffix = "\n\nProposta di aggiornamento pronta: usa /conferma per applicarla o /annulla." if change else ""
+        await application.bot.send_message(chat_id=int(chat_id), text=(f"📈 Recap {cadence} CRM\n\n{recap}" + suffix)[:4000])
+
+
+async def continuous_improvement(application):
+    """Run once every day at 21:00 Europe/Rome; Sunday includes the weekly review."""
+    while True:
+        current = datetime.now(ROME)
+        target = current.replace(hour=21, minute=0, second=0, microsecond=0)
+        if target <= current:
+            target += timedelta(days=1)
+        await asyncio.sleep((target - current).total_seconds())
+        try:
+            await improvement_recap(application, weekly=False)
+            if target.weekday() == 6:
+                await improvement_recap(application, weekly=True)
+        except Exception:
+            log.exception("Continuous improvement job failed")
+
+
 def main():
     init_db()
     log.info("Starting XAU Machine admin Telegram bot")
@@ -712,6 +792,7 @@ def main():
     async def post_init(application):
         me = await application.bot.get_me()
         log.info("Admin Telegram bot connected: @%s; authorized IDs configured: %s", me.username, bool(ADMIN_IDS))
+        application.create_task(continuous_improvement(application), name="continuous-improvement")
 
     app = Application.builder().token(TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start))
