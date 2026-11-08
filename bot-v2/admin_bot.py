@@ -133,6 +133,19 @@ UNVERIFIED_DAILY_RETURN = re.compile(
     r"\bla maggior parte delle volte\b.{0,40}\b(?:rendimento|guadagno|va)\b)",
     re.IGNORECASE | re.DOTALL,
 )
+PROMPT_RELEASE_RE = re.compile(r"\s*[·•\-–—]?\s*v\.(\d+)\s*$", re.IGNORECASE)
+
+
+def next_prompt_release(current_name, requested_name):
+    """Keep an operator-facing, sequential release label in the CRM name."""
+    current_name = str(current_name or "").strip()
+    requested_name = str(requested_name or "").strip()
+    current_match = PROMPT_RELEASE_RE.search(current_name)
+    revision = int(current_match.group(1)) + 1 if current_match else 1
+    base = PROMPT_RELEASE_RE.sub("", current_name).strip()
+    if not base:
+        base = PROMPT_RELEASE_RE.sub("", requested_name).strip() or "Prompt XAU Machine"
+    return f"{base} · v.{revision}"[:160], revision
 
 
 def init_db():
@@ -300,6 +313,7 @@ async def reconcile_prompt_change(name, requested_change):
             "Posso inserire soltanto dati storici verificabili con periodo e fonte, senza farli apparire come un risultato atteso."
         )
     current = await active_master_prompt()
+    release_name, release_revision = next_prompt_release(current.get("name"), name)
     request = (
         "NOME PROPOSTO:\n" + (name or "Prompt XAU Machine") +
         "\n\nPROMPT ATTIVO (versione " + str(current.get("version")) + "):\n" +
@@ -336,7 +350,10 @@ async def reconcile_prompt_change(name, requested_change):
     else:
         conflicts_resolved = []
     return {
-        "name": str(result.get("name") or name or "Prompt XAU Machine")[:160],
+        # The model may suggest a descriptive title, but the CRM name is a
+        # release identifier for the operator and must remain sequential.
+        "name": release_name,
+        "release_revision": release_revision,
         "content": content,
         "summary": str(result.get("summary") or "Modifica integrata nel prompt completo.")[:1400],
         "conflicts_resolved": conflicts_resolved,
@@ -348,6 +365,7 @@ async def stage_reconciled_prompt(update: Update, name, requested_change):
     reviewed = await reconcile_prompt_change(name, requested_change)
     change = {"action": "prompt_update", "payload": {
         "name": reviewed["name"],
+        "release_revision": reviewed["release_revision"],
         "content": reviewed["content"],
         "replace": True,
         "reviewed_against_version": True,
@@ -360,7 +378,8 @@ async def stage_reconciled_prompt(update: Update, name, requested_change):
         update,
         change,
         "🧩 Ho letto il prompt completo attivo, integrato la modifica nella sezione corretta e preparato una sostituzione completa.\n"
-        + reviewed["summary"] + conflict_text,
+        + reviewed["summary"] + conflict_text
+        + f"\nRelease preparata: v.{reviewed['release_revision']} · {len(reviewed['content'])} caratteri.",
     )
 
 
@@ -510,7 +529,14 @@ async def execute_change(change):
         actual = normalize_prompt(active.get("content"))
         if expected != actual:
             return False, "Il CRM non ha attivato esattamente il prompt confermato: nessun successo dichiarato."
-        return True, f"Prompt attivo verificato (versione {active.get('version')}, {len(str(active.get('content') or ''))} caratteri)."
+        if str(active.get("name") or "").strip() != str(payload.get("name") or "").strip():
+            return False, "Il CRM ha salvato il testo ma non il nome della release confermata: nessun successo dichiarato."
+        release = payload.get("release_revision")
+        release_label = f"v.{release}" if release else str(active.get("name") or "versione senza etichetta")
+        return True, (
+            f"Prompt attivo verificato: {release_label} · CRM {active.get('version')} · "
+            f"{len(str(active.get('content') or ''))} caratteri."
+        )
     return True, r.text[:1000]
 
 
@@ -1115,12 +1141,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text):
                 return
             change = {"action": "prompt_update", "payload": {
                 "name": reviewed["name"],
+                "release_revision": reviewed["release_revision"],
                 "content": reviewed["content"],
                 "replace": True,
                 "reviewed_against_version": True,
             }}
             conflicts = reviewed["conflicts_resolved"]
             reply += "\n\n🧩 Ho confrontato la richiesta con l'intero prompt attivo e preparato una sostituzione completa. " + reviewed["summary"]
+            reply += f" Release preparata: v.{reviewed['release_revision']} · {len(reviewed['content'])} caratteri."
             if conflicts:
                 reply += " Conflitti risolti: " + "; ".join(str(item) for item in conflicts[:6])
         if change.get("action") == "sales_broadcast":
@@ -1250,13 +1278,26 @@ async def restore_today_telegram_prompt_updates(update: Update, context: Context
         )
         return
     recovered = "Recupero storico delle modifiche Telegram confermate:\n" + "\n".join(instructions)
+    try:
+        reviewed = await reconcile_prompt_change(
+            f"Recupero storico Telegram {datetime.now(ROME).date().isoformat()}", recovered
+        )
+    except PromptChangeNotApplicable as exc:
+        await update.effective_message.reply_text("⚠️ Recupero non preparato: " + str(exc))
+        return
+    except Exception:
+        log.exception("Telegram prompt recovery reconciliation failed")
+        await update.effective_message.reply_text("⚠️ Non riesco a riconciliare il recupero con il prompt attivo.")
+        return
     change = {"action": "prompt_update", "payload": {
-        "name": f"Recupero storico Telegram {datetime.now(ROME).date().isoformat()}",
-        "content": recovered,
-        "replace": False,
+        "name": reviewed["name"],
+        "release_revision": reviewed["release_revision"],
+        "content": reviewed["content"],
+        "replace": True,
+        "reviewed_against_version": True,
     }}
     extra = f" Ho lasciato separati {skipped_imports} import TXT completi." if skipped_imports else ""
-    await stage_change(update, change, f"♻️ Ho recuperato {len(instructions)} modifiche Telegram distinte dall'intero registro ({len(rows)} conferme trovate).{extra}")
+    await stage_change(update, change, f"♻️ Ho recuperato {len(instructions)} modifiche Telegram distinte dall'intero registro ({len(rows)} conferme trovate).{extra} Release preparata: v.{reviewed['release_revision']} · {len(reviewed['content'])} caratteri.")
 
 
 def admin_recipients():
@@ -1305,19 +1346,30 @@ async def improvement_recap(application, weekly=False):
     except Exception:
         log.exception("Continuous improvement AI analysis failed")
         return
+    change = None
     if len(instruction) >= 20:
-        change = {"action": "prompt_update", "payload": {
-            "name": f"Miglioramento {cadence} {datetime.now(ROME).date().isoformat()}",
-            "content": instruction,
-        }}
-    else:
-        change = None
+        try:
+            reviewed = await reconcile_prompt_change(
+                f"Miglioramento {cadence} {datetime.now(ROME).date().isoformat()}", instruction
+            )
+            change = {"action": "prompt_update", "payload": {
+                "name": reviewed["name"],
+                "release_revision": reviewed["release_revision"],
+                "content": reviewed["content"],
+                "replace": True,
+                "reviewed_against_version": True,
+            }}
+        except PromptChangeNotApplicable as exc:
+            recap += "\n\nNessuna modifica prompt preparata: " + str(exc)
+        except Exception:
+            log.exception("Continuous improvement prompt reconciliation failed")
+            recap += "\n\nNessuna modifica prompt preparata: verifica tecnica non disponibile."
     for chat_id in admin_recipients():
         if change:
             with closing(sqlite3.connect(DB_PATH)) as conn:
                 conn.execute("INSERT OR REPLACE INTO pending_changes(chat_id,payload,created_at) VALUES(?,?,?)", (str(chat_id), json.dumps(change), now()))
                 conn.commit()
-        suffix = "\n\nProposta di aggiornamento pronta: usa /conferma per applicarla o /annulla." if change else ""
+        suffix = (f"\n\nRelease proposta: v.{change['payload']['release_revision']} · {len(change['payload']['content'])} caratteri. Usa /conferma per applicarla o /annulla." if change else "")
         await application.bot.send_message(chat_id=int(chat_id), text=(f"📈 Recap {cadence} CRM\n\n{recap}" + suffix)[:4000])
 
 
