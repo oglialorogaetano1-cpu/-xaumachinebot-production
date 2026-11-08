@@ -1132,11 +1132,53 @@ async def prepare_labels(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await stage_change(update, {"action": "conversation_update", "payload": {"id": parts[0], "labels": labels}}, "Etichette conversazione preparate.")
 
 
+def asks_prompt_status(text: str) -> bool:
+    """Route 'was this prompt rule applied?' to the CRM, never to the planner."""
+    normalized = " ".join((text or "").lower().split())
+    asks_if_applied = any(word in normalized for word in ("applicat", "attiv", "salvat"))
+    refers_to_prompt = any(word in normalized for word in ("regola", "prompt", "modifica", "questa", "quella"))
+    return asks_if_applied and refers_to_prompt
+
+
+async def reply_prompt_status(update: Update, chat_id: int):
+    """Give a read-back from the active CRM version rather than a guessed answer."""
+    try:
+        active = await active_master_prompt()
+    except Exception:
+        log.exception("Prompt status lookup failed")
+        await update.effective_message.reply_text(
+            "⚠️ Non riesco a leggere la versione attiva dal CRM: non posso confermare che la regola sia applicata."
+        )
+        return
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        latest = conn.execute(
+            "SELECT outcome, created_at FROM audit WHERE chat_id=? AND action='prompt_update' ORDER BY id DESC LIMIT 1",
+            (str(chat_id),),
+        ).fetchone()
+    last_confirmation = (
+        f" Ultima conferma registrata: {latest[1]}." if latest and latest[0] == "ok"
+        else " Nessuna conferma locale piu' recente da usare come riferimento."
+    )
+    content = str(active.get("content") or "")
+    fingerprint = hashlib.sha256(normalize_prompt(content).encode("utf-8")).hexdigest()[:12]
+    reply = (
+        f"✅ Sì: il CRM sta usando adesso {active.get('name')} · CRM {active.get('version')} · "
+        f"{len(content)} caratteri · impronta {fingerprint}."
+        + last_confirmation +
+        " Non serve un nuovo /conferma: /conferma agisce solo su una nuova modifica in attesa."
+    )
+    remember(chat_id, "assistant", reply)
+    await update.effective_message.reply_text(reply)
+
+
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text):
     if not authorized(update):
         return
     chat_id = update.effective_chat.id
     remember(chat_id, "user", text)
+    if asks_prompt_status(text):
+        await reply_prompt_status(update, chat_id)
+        return
     direct_change = natural_verified_customer_request(text)
     if direct_change:
         try:
