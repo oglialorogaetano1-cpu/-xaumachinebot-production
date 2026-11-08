@@ -996,9 +996,10 @@ async def forum_operator_message(update: Update, context: ContextTypes.DEFAULT_T
                 )
             body = msg.caption or "Allegato inviato dall'operatore"
         await crm_record_forum_reply(mapping, body)
-        stopped = await crm_set_ai_control(int(mapping["telegram_chat_id"]), "stop")
-        if stopped.get("ok"):
-            await msg.reply_text("⛔ IA spenta per questo cliente. Scrivi /accendi nel Topic per riattivarla.")
+        # Una risposta manuale mette l'IA in pausa per quel cliente, ma non deve
+        # generare rumore nel Topic: l'operatore conosce gia' la propria azione.
+        # Restano invece espliciti i soli comandi /stop e /accendi qui sopra.
+        await crm_set_ai_control(int(mapping["telegram_chat_id"]), "stop")
     except Exception as exc:
         log.warning("Risposta Topic -> cliente fallita: %s", exc)
         await msg.reply_text("⚠️ Invio al cliente non riuscito. Riprova tra poco.")
