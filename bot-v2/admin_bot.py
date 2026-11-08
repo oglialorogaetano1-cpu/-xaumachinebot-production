@@ -192,19 +192,18 @@ async def openai_text(text):
 
 
 async def crm_tenant_id():
-    """Resolve the real tenant UUID instead of relying on a stale placeholder."""
+    """Resolve the real tenant UUID through the secret-protected CRM RPC."""
     global _tenant_id_cache
     if _tenant_id_cache:
         return _tenant_id_cache
     async with httpx.AsyncClient(timeout=25) as client:
-        response = await client.get(
-            f"{SUPABASE_URL}/rest/v1/crm_tenants",
+        response = await client.post(
+            f"{SUPABASE_URL}/rest/v1/rpc/crm_get_tenant_id_for_telegram",
             headers=supabase_headers(),
-            params={"select": "id", "slug": f"eq.{TENANT_SLUG}", "limit": "1"},
+            json={"p_secret": CRM_SECRET, "p_tenant_slug": TENANT_SLUG},
         )
     response.raise_for_status()
-    rows = response.json() or []
-    tenant_id = str(rows[0].get("id") or "") if rows else ""
+    tenant_id = str(response.json() or "")
     if not tenant_id:
         raise RuntimeError(f"Tenant CRM '{TENANT_SLUG}' non trovato")
     _tenant_id_cache = tenant_id
@@ -213,20 +212,11 @@ async def crm_tenant_id():
 
 async def active_master_prompt():
     """Read the whole active prompt before drafting any rule change."""
-    tenant_id = await crm_tenant_id()
-    params = {
-        "select": "name,content,version",
-        "tenant_id": f"eq.{tenant_id}",
-        "product": "eq.conversation",
-        "active": "eq.true",
-        "order": "version.desc",
-        "limit": "1",
-    }
     async with httpx.AsyncClient(timeout=25) as client:
-        response = await client.get(
-            f"{SUPABASE_URL}/rest/v1/crm_prompt_versions",
+        response = await client.post(
+            f"{SUPABASE_URL}/rest/v1/rpc/crm_get_master_prompt_for_telegram",
             headers=supabase_headers(),
-            params=params,
+            json={"p_secret": CRM_SECRET, "p_tenant_slug": TENANT_SLUG},
         )
     response.raise_for_status()
     rows = response.json() or []
