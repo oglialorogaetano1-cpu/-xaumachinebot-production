@@ -36,10 +36,6 @@ SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 CRM_SECRET = os.environ["CRM_TRACKING_SECRET"]
 TENANT_SLUG = os.environ.get("CRM_TENANT_SLUG", "xau-machine").strip()
 SUPPORT_FORUM_CHAT_ID = os.environ.get("SUPPORT_FORUM_CHAT_ID", "").strip()
-AI_TRADER_GUIDE_IT_URL = os.environ.get(
-    "AI_TRADER_GUIDE_IT_URL",
-    "https://ai-trader-mt5-checkout.vercel.app/guides/AI_Trader_MT5_Guida_Installazione_IT.pdf",
-).strip()
 ADMIN_IDS = {item.strip() for item in os.environ.get("ADMIN_CHAT_ID", "").split(",") if item.strip()}
 BOOTSTRAP_CODE = os.environ.get("ADMIN_BOOTSTRAP_CODE", "")
 DB_PATH = Path(os.environ.get("ADMIN_MEMORY_DB", "/data/admin-bot.sqlite3"))
@@ -73,6 +69,9 @@ un segmento diverso senza chiedere prima un chiarimento. Per una verifica
 manuale di un singolo cliente, guida/istruzioni e riattivazione IA usa
 verified_customer_action con payload.reference (username @utente oppure nome),
 send_installation_guide (booleano), body opzionale e activate_ai (booleano).
+send_installation_guide invia esclusivamente la guida scritta per registrazione
+PU Prime/IB verificata: non invia mai una guida di acquisto, licenza o
+installazione AI Trader MT5.
 Usalo quando l'amministratore chiede, ad esempio, "ho verificato @utente,
 manda la guida e attiva IA". Non richiedere ID tecnici: il sistema risolve il
 cliente dal CRM prima di preparare la conferma. L'amministratore non conosce
@@ -87,13 +86,15 @@ parametri necessari sono completi. Non dichiarare mai di non avere accesso alle
 conversazioni CRM: per analizzarne una, guida l'amministratore a usare
 /conversazioni e /analizza <id> quando manca l'identificativo."""
 
-# The installation guide is intentionally a fixed, operator-approved asset. A
-# planner may request it, but cannot provide an arbitrary URL by itself.
-INSTALLATION_GUIDE_MESSAGE = (
-    "✅ La verifica manuale è completata.\n\n"
-    "Puoi procedere con l'installazione seguendo questa guida:\n"
-    f"{AI_TRADER_GUIDE_IT_URL}\n\n"
-    "Quando hai completato i passaggi, rispondi qui e ti assistiamo nel passaggio successivo."
+# This message is deliberately separate from the paid AI Trader MT5 delivery
+# guide. A verified PU Prime/IB client must never receive a license, purchase
+# or software-installation link from this admin action.
+VERIFIED_IB_GUIDE_MESSAGE = (
+    "✅ La registrazione è verificata e il tuo conto PU Prime risulta collegato a noi.\n\n"
+    "Per proseguire: apri l’app PU Prime e controlla di utilizzare il conto corretto. "
+    "Se devi ancora creare il conto per il copy trading, seleziona Copy Popular Trading, "
+    "conto Standard, valuta EUR e nessun voucher.\n\n"
+    "Quando hai completato questo passaggio, scrivi qui: ti guidiamo nella fase successiva."
 )
 
 PROMPT_RECONCILER = """Sei il revisore del prompt customer-facing di XAU Machine.
@@ -636,10 +637,10 @@ async def prepare_verified_customer_action(update: Update, change):
     requested_body = str(payload.get("body") or "").strip()
     include_guide = bool(payload.get("send_installation_guide"))
     if not requested_body and not include_guide:
-        raise ValueError("Specifica il messaggio o chiedi esplicitamente la guida d'installazione.")
+        raise ValueError("Specifica il messaggio o chiedi esplicitamente la guida per il cliente verificato.")
     body_parts = [requested_body] if requested_body else []
     if include_guide:
-        body_parts.append(INSTALLATION_GUIDE_MESSAGE)
+        body_parts.append(VERIFIED_IB_GUIDE_MESSAGE)
     prepared = {
         "action": "verified_customer_action",
         "payload": {
@@ -650,7 +651,7 @@ async def prepare_verified_customer_action(update: Update, change):
             "recipient_label": str(target.get("name") or reference)[:160],
         },
     }
-    actions = ["guida d'installazione" if include_guide else "messaggio richiesto"]
+    actions = ["guida registrazione verificata" if include_guide else "messaggio richiesto"]
     if prepared["payload"]["activate_ai"]:
         actions.append("IA riattivata")
     return prepared, f"Cliente risolto: {prepared['payload']['recipient_label']}. Operazioni pronte: {', '.join(actions)}."
@@ -918,7 +919,7 @@ async def prepare_verified_customer(update: Update, context: ContextTypes.DEFAUL
         return
     if not context.args:
         await update.effective_message.reply_text(
-            "Uso: /verificato @username [| messaggio aggiuntivo]. Preparo guida d'installazione e riattivazione IA, poi chiedero' /conferma."
+            "Uso: /verificato @username [| messaggio aggiuntivo]. Preparo la guida scritta per la registrazione verificata e la riattivazione IA, poi chiedero' /conferma."
         )
         return
     raw = " ".join(context.args)
