@@ -492,21 +492,25 @@ async def resolve_customer_reference(reference):
 
     candidates = []
     try:
-        rows = await crm_get("crm_telegram_topics", {
-            "select": "telegram_user_id,telegram_chat_id,topic_name",
-            "topic_name": f"ilike.*{ref}*",
-            "limit": "10",
-        })
-        for row in rows:
-            topic_name = str(row.get("topic_name") or "").lower()
-            # A substring in an unrelated full name is not a safe recipient.
-            if f"@{ref}" in topic_name or topic_name.strip() == ref:
-                candidates.append({
-                    "chat_id": row.get("telegram_chat_id") or row.get("telegram_user_id"),
-                    "user_id": row.get("telegram_user_id"),
-                    "name": row.get("topic_name") or f"@{ref}",
-                    "lead_id": None,
-                })
+        # The Topics table is deliberately not exposed through the REST table
+        # API.  Resolve it through the same secret-protected RPC pattern used
+        # by the existing Topic read/write calls, rather than assuming a public
+        # table endpoint exists.
+        async with httpx.AsyncClient(timeout=20) as client:
+            response = await client.post(
+                f"{SUPABASE_URL}/rest/v1/rpc/crm_find_telegram_topic_by_reference",
+                headers=supabase_headers(),
+                json={"p_secret": CRM_SECRET, "p_tenant_slug": TENANT_SLUG, "p_reference": ref},
+            )
+        response.raise_for_status()
+        row = response.json() or {}
+        if isinstance(row, dict) and row.get("telegram_chat_id"):
+            candidates.append({
+                "chat_id": row.get("telegram_chat_id") or row.get("telegram_user_id"),
+                "user_id": row.get("telegram_user_id"),
+                "name": row.get("topic_name") or f"@{ref}",
+                "lead_id": None,
+            })
     except httpx.HTTPError:
         log.info("Topic username lookup unavailable; trying CRM lead lookup")
 
