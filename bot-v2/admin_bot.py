@@ -90,11 +90,18 @@ conversazioni CRM: per analizzarne una, guida l'amministratore a usare
 # guide. A verified PU Prime/IB client must never receive a license, purchase
 # or software-installation link from this admin action.
 VERIFIED_IB_GUIDE_MESSAGE = (
-    "✅ La registrazione è verificata e il tuo conto PU Prime risulta collegato a noi.\n\n"
-    "Per proseguire: apri l’app PU Prime e controlla di utilizzare il conto corretto. "
+    "✅ GUIDA UFFICIALE PU PRIME — COPY TRADING\n\n"
+    "La registrazione è verificata e il tuo conto PU Prime risulta collegato a noi.\n\n"
+    "⚠️ PRIMA DI INIZIARE\n"
     "Se devi ancora creare il conto per il copy trading, seleziona Copy Popular Trading, "
-    "conto Standard, valuta EUR e nessun voucher.\n\n"
-    "Quando hai completato questo passaggio, scrivi qui: ti guidiamo nella fase successiva."
+    "conto Standard e la valuta disponibile che preferisci.\n\n"
+    "🎁 PROMOZIONI\n"
+    "Prima di depositare, controlla nella sezione Promozioni dell’app se hai un’offerta attiva e idonea. "
+    "L’eventuale bonus, importo, conto ammesso e condizioni dipendono dalla promozione mostrata nel tuo profilo.\n\n"
+    "💳 DEPOSITO\n"
+    "Effettua il deposito esclusivamente sul conto Copy Popular Trading corretto.\n\n"
+    "📸 CONFERMA FINALE\n"
+    "Quando hai completato i passaggi, mandami uno screenshot della schermata: verifichiamo insieme che sia impostato correttamente."
 )
 
 PROMPT_RECONCILER = """Sei il revisore del prompt customer-facing di XAU Machine.
@@ -474,6 +481,7 @@ async def execute_change(change):
             r = await client.post(f"{SUPABASE_URL}/rest/v1/crm_messages", headers=headers, json={"conversation_id": payload["conversation_id"], "tenant_id": tenant_id, "direction": "outbound", "sender_type": "human", "body": body})
         elif action == "verified_customer_action":
             chat_id = str(payload["telegram_chat_id"])
+            user_id = int(str(payload.get("telegram_user_id") or chat_id))
             body = str(payload["body"])[:8000]
             queued = await client.post(
                 f"{SUPABASE_URL}/rest/v1/rpc/crm_enqueue_operator_message_from_telegram",
@@ -487,6 +495,30 @@ async def execute_change(change):
             )
             if queued.status_code >= 300:
                 return False, f"Coda Telegram rifiutata ({queued.status_code})."
+            # The delivery queue sends the guide; this second protected RPC
+            # records the same text in the CRM history. Otherwise a customer
+            # replying “Fatto” has no guide context and gets re-verified.
+            history_write = await client.post(
+                f"{SUPABASE_URL}/rest/v1/rpc/crm_bot_message",
+                headers=headers,
+                json={
+                    "p_secret": CRM_SECRET,
+                    "p_tenant_slug": TENANT_SLUG,
+                    "p_telegram_user_id": user_id,
+                    "p_telegram_chat_id": int(chat_id),
+                    "p_full_name": "",
+                    "p_username": "",
+                    "p_direction": "outbound",
+                    "p_body": body,
+                    "p_sender_type": "human",
+                    "p_business_connection_id": None,
+                },
+            )
+            if history_write.status_code >= 300:
+                return False, (
+                    "Guida inviata ma non registrata nello storico CRM "
+                    f"({history_write.status_code}); non posso confermare il flusso automatico."
+                )
             if payload.get("activate_ai"):
                 ai = await client.post(
                     f"{SUPABASE_URL}/rest/v1/rpc/crm_set_ai_control",
@@ -495,9 +527,7 @@ async def execute_change(change):
                 )
                 if ai.status_code >= 300:
                     return False, f"Guida in coda, ma CRM ha rifiutato la riattivazione IA ({ai.status_code})."
-            # The protected queue is the delivery authority.  Do not turn a
-            # successful customer send into a false failure merely because an
-            # optional direct history write is blocked by CRM RLS.
+            # Both delivery and CRM context have now been confirmed.
             r = queued
         elif action == "lead_create":
             r = await client.post(f"{SUPABASE_URL}/rest/v1/crm_leads", headers={**headers, "Prefer": "return=representation"}, json=payload)
@@ -645,6 +675,7 @@ async def prepare_verified_customer_action(update: Update, change):
         "action": "verified_customer_action",
         "payload": {
             "telegram_chat_id": str(target["chat_id"]),
+            "telegram_user_id": str(target.get("user_id") or target["chat_id"]),
             "conversation_id": target.get("conversation_id"),
             "body": "\n\n".join(body_parts)[:8000],
             "activate_ai": bool(payload.get("activate_ai")),

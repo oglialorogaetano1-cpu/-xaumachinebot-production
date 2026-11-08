@@ -224,6 +224,12 @@ PU_PRIME_NOT_FOUND = (
 )
 
 DEFAULT_WELCOME_MESSAGE = "Ciao 👋 Benvenuto in XAU Machine. Posso spiegarti come funziona il copy trading automatico, aiutarti con PU Prime oppure mostrarti dati storici disponibili. Da cosa vuoi partire?"
+VERIFIED_IB_GUIDE_MARKER = "GUIDA UFFICIALE PU PRIME — COPY TRADING"
+VERIFIED_IB_COMPLETION_REPLY = (
+    "Perfetto 👍 Mandami ora uno screenshot della schermata Copy Popular Trading "
+    "con le impostazioni visibili: così controlliamo il passaggio successivo senza "
+    "farti ripetere la registrazione."
+)
 
 # ---------------------------------------------------------- richieste MT5
 # Parole/frasi che fanno riconoscere una richiesta di vedere l'andamento
@@ -1501,6 +1507,27 @@ def _estrai_risposta_cliente(testo_ai: str) -> tuple[str, dict]:
     return reply.strip(), dati
 
 
+def completed_verified_ib_guide(text: str, history: list[dict]) -> bool:
+    """Recognize a concise completion reply after the official IB guide.
+
+    The guide is sent by the admin bot and persisted as a human outbound CRM
+    message. Checking history first prevents a generic “Fatto” from being
+    treated as a completed registration in an unrelated conversation.
+    """
+    completed = re.fullmatch(
+        r"\s*(?:fatto|fatta|completato|completata|ok|okay|si|sì)\s*[!✅.]*\s*",
+        text or "",
+        re.IGNORECASE,
+    )
+    if not completed:
+        return False
+    return any(
+        VERIFIED_IB_GUIDE_MARKER in str(item.get("content") or "")
+        for item in history or []
+        if item.get("role") == "assistant"
+    )
+
+
 async def genera_risposta_ai(testo: str, contesto: dict) -> tuple[str, dict]:
     prompt_crm = (contesto.get("prompt") or "").strip()
     instructions = AI_RUNTIME_RULES
@@ -1728,6 +1755,10 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await richiedi_screenshot_mt5(update, context, periodo, testo)
         return
     contesto = await record_message(update, "in", testo, "lead")
+    if completed_verified_ib_guide(testo, contesto.get("history") or []):
+        await msg.reply_text(VERIFIED_IB_COMPLETION_REPLY)
+        await record_message(update, "out", VERIFIED_IB_COMPLETION_REPLY, "ai")
+        return
     contesto["puprime"] = await crm_puprime_context(update, testo)
     if not await crm_ai_attiva(update.effective_chat.id):
         return
