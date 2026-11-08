@@ -748,24 +748,63 @@ async def google_translate_from_italian(text: str, target_language: str) -> tupl
 
 async def google_translate_to_italian(text: str) -> tuple[str, bool, str]:
     """Traduce i messaggi dei clienti per renderli leggibili nel Topic."""
-    if not text or not GOOGLE_TRANSLATE_API_KEY:
+    if not text:
         return text, False, ""
+    if GOOGLE_TRANSLATE_API_KEY:
+        try:
+            async with httpx.AsyncClient(timeout=12) as client:
+                r = await client.post(
+                    "https://translation.googleapis.com/language/translate/v2",
+                    params={"key": GOOGLE_TRANSLATE_API_KEY},
+                    json={"q": text, "target": "it", "format": "text"},
+                )
+            if r.status_code < 300:
+                translation = (((r.json().get("data") or {}).get("translations") or [{}])[0])
+                translated = str(translation.get("translatedText") or "").strip()
+                detected_language = str(translation.get("detectedSourceLanguage") or "").lower()
+                return (translated or text), bool(translated), detected_language
+            log.warning("Google Translate verso italiano fallito %s: %s", r.status_code, r.text[:200])
+        except Exception as exc:
+            log.warning("Google Translate verso italiano non disponibile: %s", exc)
+    return await ai_translate_to_italian(text)
+
+
+async def ai_translate_to_italian(text: str) -> tuple[str, bool, str]:
+    """Fallback privato: usa la Edge Function CRM quando Google non e' configurato.
+
+    Il testo resta nell'infrastruttura AI gia' usata per le risposte CRM; viene
+    usato solo come nota interna nel Topic e non viene mai inviato al cliente.
+    """
+    if not CRM_TRACKING_SECRET:
+        return text, False, ""
+    instructions = (
+        "Traduci fedelmente il seguente messaggio in italiano. Restituisci solo "
+        "la traduzione, senza prefazioni, emoji, spiegazioni o consigli. Se il "
+        "messaggio e' gia' in italiano, restituiscilo invariato."
+    )
     try:
-        async with httpx.AsyncClient(timeout=12) as client:
+        async with httpx.AsyncClient(timeout=20) as client:
             r = await client.post(
-                "https://translation.googleapis.com/language/translate/v2",
-                params={"key": GOOGLE_TRANSLATE_API_KEY},
-                json={"q": text, "target": "it", "format": "text"},
+                f"{SUPABASE_URL}/functions/v1/crm-ai-chat",
+                headers={
+                    "apikey": SUPABASE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "runtime_secret": CRM_TRACKING_SECRET,
+                    "tenant_slug": CRM_TENANT_SLUG,
+                    "instructions": instructions,
+                    "input": [{"role": "user", "content": text[:3900]}],
+                },
             )
         if r.status_code >= 300:
-            log.warning("Google Translate verso italiano fallito %s: %s", r.status_code, r.text[:200])
+            log.warning("Fallback traduzione CRM fallito %s: %s", r.status_code, r.text[:200])
             return text, False, ""
-        translation = (((r.json().get("data") or {}).get("translations") or [{}])[0])
-        translated = str(translation.get("translatedText") or "").strip()
-        detected_language = str(translation.get("detectedSourceLanguage") or "").lower()
-        return (translated or text), bool(translated), detected_language
+        translated = str((r.json() or {}).get("text") or "").strip()
+        return (translated or text), bool(translated), "ai"
     except Exception as exc:
-        log.warning("Google Translate verso italiano non disponibile: %s", exc)
+        log.warning("Fallback traduzione CRM non disponibile: %s", exc)
         return text, False, ""
 
 
@@ -820,8 +859,6 @@ async def mirror_text_to_forum(update: Update, direction: str, body: str,
         return
     if update.effective_user and update.effective_user.is_bot:
         return
-    if not getattr(update.effective_message, "business_connection_id", None):
-        return
     thread_id = await ensure_customer_topic(update)
     if not thread_id:
         return
@@ -831,10 +868,10 @@ async def mirror_text_to_forum(update: Update, direction: str, body: str,
     topic_body = body[:3900]
     if direction not in ("out", "outbound"):
         italian, translated, detected_language = await google_translate_to_italian(topic_body)
-        if detected_language:
+        if detected_language and detected_language != "ai":
             await crm_store_language_code(update, detected_language)
         if translated and italian.casefold() != topic_body.casefold():
-            topic_body = f"{topic_body}\n\n🇮🇹 Italiano: {italian}"
+            topic_body = f"{topic_body}\n\n🇮🇹 Traduzione italiana: {italian}"
         log.info(
             "Traduzione Topic cliente: eseguita=%s lingua_rilevata=%s",
             translated,
