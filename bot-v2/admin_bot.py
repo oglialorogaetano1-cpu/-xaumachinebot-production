@@ -33,11 +33,13 @@ OPENAI_KEY = os.environ["ADMIN_OPENAI_API_KEY"]
 SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 CRM_SECRET = os.environ["CRM_TRACKING_SECRET"]
+TENANT_SLUG = os.environ.get("CRM_TENANT_SLUG", "xau-machine").strip()
 SUPPORT_FORUM_CHAT_ID = os.environ.get("SUPPORT_FORUM_CHAT_ID", "").strip()
 ADMIN_IDS = {item.strip() for item in os.environ.get("ADMIN_CHAT_ID", "").split(",") if item.strip()}
 BOOTSTRAP_CODE = os.environ.get("ADMIN_BOOTSTRAP_CODE", "")
 DB_PATH = Path(os.environ.get("ADMIN_MEMORY_DB", "/data/admin-bot.sqlite3"))
 ROME = ZoneInfo("Europe/Rome")
+_tenant_id_cache = None
 
 SYSTEM = """Sei l'assistente amministratore privato del CRM XAU Machine.
 Parli italiano e assisti esclusivamente gli amministratori autorizzati. Puoi
@@ -189,11 +191,32 @@ async def openai_text(text):
     return response_text(response.json()).strip()
 
 
+async def crm_tenant_id():
+    """Resolve the real tenant UUID instead of relying on a stale placeholder."""
+    global _tenant_id_cache
+    if _tenant_id_cache:
+        return _tenant_id_cache
+    async with httpx.AsyncClient(timeout=25) as client:
+        response = await client.get(
+            f"{SUPABASE_URL}/rest/v1/crm_tenants",
+            headers=supabase_headers(),
+            params={"select": "id", "slug": f"eq.{TENANT_SLUG}", "limit": "1"},
+        )
+    response.raise_for_status()
+    rows = response.json() or []
+    tenant_id = str(rows[0].get("id") or "") if rows else ""
+    if not tenant_id:
+        raise RuntimeError(f"Tenant CRM '{TENANT_SLUG}' non trovato")
+    _tenant_id_cache = tenant_id
+    return tenant_id
+
+
 async def active_master_prompt():
     """Read the whole active prompt before drafting any rule change."""
+    tenant_id = await crm_tenant_id()
     params = {
         "select": "name,content,version",
-        "tenant_id": "eq.00000000-0000-4000-8000-000000000001",
+        "tenant_id": f"eq.{tenant_id}",
         "product": "eq.conversation",
         "active": "eq.true",
         "order": "version.desc",
@@ -345,10 +368,11 @@ async def execute_change(change):
         elif action == "sales_send":
             chat_id = str(payload["telegram_chat_id"])
             body = str(payload["body"])[:8000]
-            queued = await client.post(f"{SUPABASE_URL}/rest/v1/crm_operator_outbox", headers={**headers, "Prefer": "return=representation"}, json={"tenant_id": "00000000-0000-4000-8000-000000000001", "tenant_slug": "xau-machine", "telegram_chat_id": chat_id, "body": body})
+            tenant_id = await crm_tenant_id()
+            queued = await client.post(f"{SUPABASE_URL}/rest/v1/crm_operator_outbox", headers={**headers, "Prefer": "return=representation"}, json={"tenant_id": tenant_id, "tenant_slug": TENANT_SLUG, "telegram_chat_id": chat_id, "body": body})
             if queued.status_code >= 300:
                 return False, f"Coda Telegram rifiutata ({queued.status_code})."
-            r = await client.post(f"{SUPABASE_URL}/rest/v1/crm_messages", headers=headers, json={"conversation_id": payload["conversation_id"], "tenant_id": "00000000-0000-4000-8000-000000000001", "direction": "outbound", "sender_type": "human", "body": body})
+            r = await client.post(f"{SUPABASE_URL}/rest/v1/crm_messages", headers=headers, json={"conversation_id": payload["conversation_id"], "tenant_id": tenant_id, "direction": "outbound", "sender_type": "human", "body": body})
         elif action == "lead_create":
             r = await client.post(f"{SUPABASE_URL}/rest/v1/crm_leads", headers={**headers, "Prefer": "return=representation"}, json=payload)
         elif action == "lead_update":
@@ -404,6 +428,7 @@ async def execute_broadcast(payload):
     headers = {**supabase_headers(), "Prefer": "return=minimal"}
     translated = {}
     sent, failed = 0, 0
+    tenant_id = await crm_tenant_id()
     async with httpx.AsyncClient(timeout=25) as client:
         for target in targets:
             try:
@@ -411,11 +436,11 @@ async def execute_broadcast(payload):
                 if language not in translated:
                     translated[language] = await translate_sales_text(body, language)
                 message = translated[language]
-                queue = await client.post(f"{SUPABASE_URL}/rest/v1/crm_operator_outbox", headers=headers, json={"tenant_id": "00000000-0000-4000-8000-000000000001", "tenant_slug": "xau-machine", "telegram_chat_id": target["chat_id"], "body": message})
+                queue = await client.post(f"{SUPABASE_URL}/rest/v1/crm_operator_outbox", headers=headers, json={"tenant_id": tenant_id, "tenant_slug": TENANT_SLUG, "telegram_chat_id": target["chat_id"], "body": message})
                 if queue.status_code >= 300:
                     failed += 1
                     continue
-                history = await client.post(f"{SUPABASE_URL}/rest/v1/crm_messages", headers=headers, json={"conversation_id": target["conversation_id"], "tenant_id": "00000000-0000-4000-8000-000000000001", "direction": "outbound", "sender_type": "human", "body": message})
+                history = await client.post(f"{SUPABASE_URL}/rest/v1/crm_messages", headers=headers, json={"conversation_id": target["conversation_id"], "tenant_id": tenant_id, "direction": "outbound", "sender_type": "human", "body": message})
                 if history.status_code >= 300:
                     failed += 1
                 else:
