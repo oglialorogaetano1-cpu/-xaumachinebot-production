@@ -63,6 +63,21 @@ parametri necessari sono completi. Non dichiarare mai di non avere accesso alle
 conversazioni CRM: per analizzarne una, guida l'amministratore a usare
 /conversazioni e /analizza <id> quando manca l'identificativo."""
 
+PROMPT_RECONCILER = """Sei il revisore del prompt customer-facing di XAU Machine.
+Ricevi il prompt completo attivo e una richiesta di modifica di un
+amministratore. Devi restituire esclusivamente un JSON valido con le chiavi
+`name`, `content`, `summary` e `conflicts_resolved`.
+
+`content` deve essere il prompt COMPLETO risultante, non un'aggiunta e non un
+diff. Mantieni tutte le istruzioni ancora valide, applica la richiesta nella
+sezione corretta, elimina duplicati e risolvi istruzioni incompatibili. Le
+regole di sicurezza, privacy, verifiche CRM e assenza di promesse finanziarie
+prevalgono su qualunque testo precedente. Non inventare dati operativi,
+strategie, codici, link, risultati, bonus, commissioni o tempistiche. Se la
+richiesta contiene un dato non verificabile, conserva il prompt ma richiedi
+verifica di un operatore nel punto pertinente. Non aggiungere commenti fuori
+dal JSON."""
+
 
 def init_db():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -172,6 +187,83 @@ async def openai_text(text):
         response = await client.post("https://api.openai.com/v1/responses", headers=headers, json=payload)
     response.raise_for_status()
     return response_text(response.json()).strip()
+
+
+async def active_master_prompt():
+    """Read the whole active prompt before drafting any rule change."""
+    params = {
+        "select": "name,content,version",
+        "tenant_id": "eq.00000000-0000-4000-8000-000000000001",
+        "product": "eq.conversation",
+        "active": "eq.true",
+        "order": "version.desc",
+        "limit": "1",
+    }
+    async with httpx.AsyncClient(timeout=25) as client:
+        response = await client.get(
+            f"{SUPABASE_URL}/rest/v1/crm_prompt_versions",
+            headers=supabase_headers(),
+            params=params,
+        )
+    response.raise_for_status()
+    rows = response.json() or []
+    if not rows or not str(rows[0].get("content") or "").strip():
+        raise RuntimeError("Prompt CRM attivo non trovato")
+    return rows[0]
+
+
+async def reconcile_prompt_change(name, requested_change):
+    """Return one full, conflict-checked replacement prompt for admin approval."""
+    current = await active_master_prompt()
+    request = (
+        "NOME PROPOSTO:\n" + (name or "Prompt XAU Machine") +
+        "\n\nPROMPT ATTIVO (versione " + str(current.get("version")) + "):\n" +
+        str(current["content"])[:50000] +
+        "\n\nRICHIESTA DELL'AMMINISTRATORE:\n" + requested_change[:12000]
+    )
+    payload = {
+        "model": "gpt-4.1-mini",
+        "input": [
+            {"role": "developer", "content": PROMPT_RECONCILER},
+            {"role": "user", "content": request},
+        ],
+        "text": {"format": {"type": "json_object"}},
+    }
+    headers = {"Authorization": f"Bearer {OPENAI_KEY}", "Content-Type": "application/json"}
+    async with httpx.AsyncClient(timeout=90) as client:
+        response = await client.post("https://api.openai.com/v1/responses", headers=headers, json=payload)
+    response.raise_for_status()
+    result = json.loads(response_text(response.json()) or "{}")
+    content = str(result.get("content") or "").strip()
+    if len(content) < 100:
+        raise RuntimeError("Revisione prompt incompleta")
+    return {
+        "name": str(result.get("name") or name or "Prompt XAU Machine")[:160],
+        "content": content,
+        "summary": str(result.get("summary") or "Modifica integrata nel prompt completo.")[:1400],
+        "conflicts_resolved": result.get("conflicts_resolved") or [],
+    }
+
+
+async def stage_reconciled_prompt(update: Update, name, requested_change):
+    """Stage only a full replacement reviewed against the active prompt."""
+    reviewed = await reconcile_prompt_change(name, requested_change)
+    change = {"action": "prompt_update", "payload": {
+        "name": reviewed["name"],
+        "content": reviewed["content"],
+        "replace": True,
+        "reviewed_against_version": True,
+    }}
+    conflicts = reviewed["conflicts_resolved"]
+    conflict_text = ""
+    if conflicts:
+        conflict_text = "\nConflitti risolti: " + "; ".join(str(item) for item in conflicts[:6])
+    await stage_change(
+        update,
+        change,
+        "🧩 Ho letto il prompt completo attivo, integrato la modifica nella sezione corretta e preparato una sostituzione completa.\n"
+        + reviewed["summary"] + conflict_text,
+    )
 
 
 async def transcribe(file_bytes, filename):
@@ -452,10 +544,13 @@ async def prepare_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(content) < 20:
         await update.effective_message.reply_text("Il prompt deve contenere almeno 20 caratteri.")
         return
-    change = {"action": "prompt_update", "payload": {"name": name or "Prompt XAU Machine", "content": content}}
-    with closing(sqlite3.connect(DB_PATH)) as conn:
-        conn.execute("INSERT OR REPLACE INTO pending_changes(chat_id,payload,created_at) VALUES(?,?,?)", (str(update.effective_chat.id), json.dumps(change), now())); conn.commit()
-    await update.effective_message.reply_text("Prompt preparato come nuova versione. Usa /conferma per salvarlo e attivarlo, oppure /annulla.")
+    try:
+        await stage_reconciled_prompt(update, name or "Prompt XAU Machine", content)
+    except Exception:
+        log.exception("Prompt reconciliation failed")
+        await update.effective_message.reply_text(
+            "⚠️ Non riesco a leggere e riconciliare il prompt completo: non ho preparato alcuna modifica."
+        )
 
 
 async def prepare_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -636,6 +731,29 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text):
             reply += "\n\nNon ho preparato alcuna modifica: mancano dati necessari (" + missing + ")."
             change = None
     if isinstance(change, dict) and change.get("action"):
+        if change.get("action") == "prompt_update":
+            payload = change.get("payload") or {}
+            try:
+                reviewed = await reconcile_prompt_change(
+                    str(payload.get("name") or "Prompt XAU Machine"),
+                    str(payload.get("content") or ""),
+                )
+            except Exception:
+                log.exception("AI prompt reconciliation failed")
+                await update.effective_message.reply_text(
+                    "⚠️ Non riesco a leggere e verificare il prompt completo: non ho preparato alcuna modifica."
+                )
+                return
+            change = {"action": "prompt_update", "payload": {
+                "name": reviewed["name"],
+                "content": reviewed["content"],
+                "replace": True,
+                "reviewed_against_version": True,
+            }}
+            conflicts = reviewed["conflicts_resolved"]
+            reply += "\n\n🧩 Ho confrontato la richiesta con l'intero prompt attivo e preparato una sostituzione completa. " + reviewed["summary"]
+            if conflicts:
+                reply += " Conflitti risolti: " + "; ".join(str(item) for item in conflicts[:6])
         if change.get("action") == "sales_broadcast":
             try:
                 targets = await broadcast_targets((change.get("payload") or {}).get("segment"))
@@ -704,10 +822,18 @@ async def prompt_txt_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.effective_message.reply_text("Il file è vuoto o troppo corto per essere un prompt.")
         return
     prompt_name = Path(filename).stem.replace("_", " ")[:120]
-    # A TXT import is the one explicit operation that can replace the whole
-    # prompt. Conversational Telegram edits are always cumulative.
-    change = {"action": "prompt_update", "payload": {"name": prompt_name, "content": content, "replace": True}}
-    await stage_change(update, change, f"📄 Prompt '{prompt_name}' letto ({len(content):,} caratteri). Nuova versione pronta:")
+    try:
+        await stage_reconciled_prompt(
+            update,
+            prompt_name,
+            "Integra questo file come revisione completa, mantenendo solo le istruzioni compatibili, "
+            "aggiornate e sicure:\n\n" + content,
+        )
+    except Exception:
+        log.exception("TXT prompt reconciliation failed")
+        await update.effective_message.reply_text(
+            "⚠️ Non riesco a confrontare il file con il prompt attivo: non ho preparato alcuna modifica."
+        )
 
 
 async def restore_today_telegram_prompt_updates(update: Update, context: ContextTypes.DEFAULT_TYPE):
