@@ -55,6 +55,9 @@ Telegram numerico reale, mai parole come "all_clients" o "cliente_corrente".
 Non usare ai_control per modifiche globali del comportamento del bot o per
 sopprimere notifiche: se non esiste un'azione applicabile, lascia change null
 e spiega chiaramente che la modifica tecnica verra' applicata separatamente.
+Allo stesso modo, non usare topic_update per richieste globali come il formato
+dei titoli di tutti i Topic: topic_update serve esclusivamente a un singolo
+Topic quando tutti gli ID numerici sono disponibili.
 Per topic_update usa
 telegram_user_id, telegram_chat_id, message_thread_id e topic_name. Per
 sales_send usa telegram_chat_id, conversation_id e body. Non inviare mai un

@@ -810,6 +810,36 @@ async def ai_translate_to_italian(text: str) -> tuple[str, bool, str]:
         return text, False, ""
 
 
+LOCALE_REGION_NAMES = {
+    "IT": "Italia", "US": "Stati Uniti", "GB": "Regno Unito", "ES": "Spagna",
+    "FR": "Francia", "DE": "Germania", "PT": "Portogallo", "BR": "Brasile",
+    "RO": "Romania", "AL": "Albania", "GR": "Grecia", "TR": "Turchia",
+    "RU": "Russia", "UA": "Ucraina", "AR": "Argentina", "MX": "Messico",
+}
+LANGUAGE_LOCALE_LABELS = {
+    "it": ("🇮🇹", "Italiano"), "en": ("🇬🇧", "Inglese"),
+    "es": ("🇪🇸", "Spagnolo"), "fr": ("🇫🇷", "Francese"),
+    "de": ("🇩🇪", "Tedesco"), "pt": ("🇵🇹", "Portoghese"),
+    "ro": ("🇷🇴", "Romeno"), "ar": ("🌐", "Arabo"),
+    "ru": ("🇷🇺", "Russo"), "uk": ("🇺🇦", "Ucraino"),
+}
+
+
+def topic_identity_name(user) -> str:
+    """Use Telegram's public username and locale without claiming unknown nationality."""
+    identity = f"@{user.username}" if user.username else (user.full_name or f"utente-{user.id}")
+    locale = str(user.language_code or "").replace("_", "-").strip()
+    parts = locale.split("-", 1)
+    language = parts[0].lower() if parts else ""
+    region = parts[1].upper() if len(parts) == 2 and len(parts[1]) == 2 else ""
+    if region and region.isalpha():
+        flag = "".join(chr(127397 + ord(letter)) for letter in region)
+        location = LOCALE_REGION_NAMES.get(region, region)
+    else:
+        flag, location = LANGUAGE_LOCALE_LABELS.get(language, ("🌐", (language or "Locale Telegram").upper()))
+    return re.sub(r"\s+", " ", f"{identity} · {flag} {location}").strip()[:120]
+
+
 async def ensure_customer_topic(update: Update) -> int | None:
     """Crea un Topic per il cliente, riusando sempre quello gia' salvato."""
     forum_chat_id = support_forum_chat_id()
@@ -817,13 +847,24 @@ async def ensure_customer_topic(update: Update) -> int | None:
         return None
     user = update.effective_user
     existing = await crm_topic_lookup(telegram_user_id=user.id)
+    topic_name = topic_identity_name(user)
     if existing.get("message_thread_id"):
-        return int(existing["message_thread_id"])
+        thread_id = int(existing["message_thread_id"])
+        if existing.get("topic_name") != topic_name:
+            try:
+                await update.get_bot().edit_forum_topic(
+                    chat_id=int(forum_chat_id), message_thread_id=thread_id, name=topic_name,
+                )
+                await crm_topic_save(
+                    telegram_user_id=user.id,
+                    telegram_chat_id=update.effective_chat.id,
+                    message_thread_id=thread_id,
+                    topic_name=topic_name,
+                )
+            except Exception as exc:
+                log.warning("Aggiornamento intestazione Topic fallito: %s", exc)
+        return thread_id
 
-    raw_name = user.full_name or f"Cliente {user.id}"
-    if user.username:
-        raw_name = f"{raw_name} · @{user.username}"
-    topic_name = re.sub(r"\s+", " ", raw_name).strip()[:120]
     try:
         topic = await update.get_bot().create_forum_topic(
             chat_id=int(forum_chat_id), name=topic_name,
