@@ -290,7 +290,7 @@ async def openai_json(chat_id, text):
     items = [{"role": "developer", "content": SYSTEM}]
     items += history(chat_id)
     items.append({"role": "user", "content": text})
-    payload = {"model": "gpt-4.1-mini", "input": items, "text": {"format": {"type": "json_object"}}}
+    payload = {"model": "gpt-4.1", "input": items, "text": {"format": {"type": "json_object"}}}
     headers = {"Authorization": f"Bearer {OPENAI_KEY}", "Content-Type": "application/json"}
     async with httpx.AsyncClient(timeout=60) as client:
         response = await client.post("https://api.openai.com/v1/responses", headers=headers, json=payload)
@@ -303,7 +303,7 @@ async def openai_json(chat_id, text):
 async def openai_text(text):
     """Plain-language fallback when the structured planner omits its reply."""
     payload = {
-        "model": "gpt-4.1-mini",
+        "model": "gpt-4.1",
         "input": [
             {"role": "developer", "content": "Sei l'assistente amministratore XAU Machine. Rispondi in italiano in modo naturale, concreto e utile. Non dire che hai analizzato una richiesta; rispondi direttamente. Non affermare di aver effettuato modifiche o invii."},
             {"role": "user", "content": text},
@@ -371,7 +371,7 @@ async def reconcile_prompt_change(name, requested_change):
         "\n\nRICHIESTA DELL'AMMINISTRATORE:\n" + requested_change[:12000]
     )
     payload = {
-        "model": "gpt-4.1-mini",
+        "model": "gpt-4.1",
         "input": [
             {"role": "developer", "content": PROMPT_RECONCILER},
             {"role": "user", "content": request},
@@ -444,7 +444,7 @@ async def transcribe(file_bytes, filename):
 
 async def inspect_image(file_bytes, caption):
     image = base64.b64encode(file_bytes).decode()
-    payload = {"model": "gpt-4.1-mini", "input": [{"role": "developer", "content": SYSTEM}, {"role": "user", "content": [{"type": "input_text", "text": "Analizza questa immagine nel contesto CRM. " + (caption or "")}, {"type": "input_image", "image_url": f"data:image/jpeg;base64,{image}"}]}]}
+    payload = {"model": "gpt-4.1", "input": [{"role": "developer", "content": SYSTEM}, {"role": "user", "content": [{"type": "input_text", "text": "Analizza questa immagine nel contesto CRM. " + (caption or "")}, {"type": "input_image", "image_url": f"data:image/jpeg;base64,{image}"}]}]}
     headers = {"Authorization": f"Bearer {OPENAI_KEY}", "Content-Type": "application/json"}
     async with httpx.AsyncClient(timeout=90) as client:
         response = await client.post("https://api.openai.com/v1/responses", headers=headers, json=payload)
@@ -462,7 +462,7 @@ async def translate_sales_text(text, language):
               "names and factual claims. Do not add promises, disclaimers, or commentary.\n\n" + text)
     headers = {"Authorization": f"Bearer {OPENAI_KEY}", "Content-Type": "application/json"}
     async with httpx.AsyncClient(timeout=45) as client:
-        response = await client.post("https://api.openai.com/v1/responses", headers=headers, json={"model": "gpt-4.1-mini", "input": prompt})
+        response = await client.post("https://api.openai.com/v1/responses", headers=headers, json={"model": "gpt-4.1", "input": prompt})
     response.raise_for_status()
     return (response.json().get("output_text") or text).strip()
 
