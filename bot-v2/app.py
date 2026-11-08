@@ -224,7 +224,7 @@ PU_PRIME_NOT_FOUND = (
 )
 
 DEFAULT_WELCOME_MESSAGE = "Ciao 👋 Benvenuto in XAU Machine. Posso spiegarti come funziona il copy trading automatico, aiutarti con PU Prime oppure mostrarti dati storici disponibili. Da cosa vuoi partire?"
-VERIFIED_IB_GUIDE_MARKER = "GUIDA UFFICIALE PU PRIME — COPY TRADING"
+VERIFIED_IB_GUIDE_MARKER = "GUIDA UFFICIALE PU PRIME"
 VERIFIED_IB_COMPLETION_REPLY = (
     "Perfetto 👍 Mandami ora uno screenshot della schermata Copy Popular Trading "
     "con le impostazioni visibili: così controlliamo il passaggio successivo senza "
@@ -1522,7 +1522,8 @@ def completed_verified_ib_guide(text: str, history: list[dict]) -> bool:
     if not completed:
         return False
     return any(
-        VERIFIED_IB_GUIDE_MARKER in str(item.get("content") or "")
+        VERIFIED_IB_GUIDE_MARKER in str(item.get("content") or "").upper()
+        and "COPY TRADING" in str(item.get("content") or "").upper()
         for item in history or []
         if item.get("role") == "assistant"
     )

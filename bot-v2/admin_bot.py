@@ -171,6 +171,12 @@ UNVERIFIED_DAILY_RETURN = re.compile(
     r"\bla maggior parte delle volte\b.{0,40}\b(?:rendimento|guadagno|va)\b)",
     re.IGNORECASE | re.DOTALL,
 )
+UNSAFE_CAPITAL_ASSURANCE = re.compile(
+    r"(?:senza\s+rischio\s+(?:di\s+)?(?:bruciare|azzerare)\s+(?:il\s+)?conto|"
+    r"(?:conto|capitale).{0,80}\b(?:non\s+pu[oò]|impossibile)\s+(?:bruciare|azzerarsi|andare\s+a\s+zero)|"
+    r"qualsiasi\s+importo.{0,120}senza\s+rischio)",
+    re.IGNORECASE | re.DOTALL,
+)
 PROMPT_RELEASE_RE = re.compile(r"\s*[·•\-–—]?\s*v\.(\d+)\s*$", re.IGNORECASE)
 
 
@@ -349,6 +355,11 @@ async def reconcile_prompt_change(name, requested_change):
         raise PromptChangeNotApplicable(
             "non posso trasformare un rendimento giornaliero atteso in una regola commerciale. "
             "Posso inserire soltanto dati storici verificabili con periodo e fonte, senza farli apparire come un risultato atteso."
+        )
+    if UNSAFE_CAPITAL_ASSURANCE.search(requested_change or ""):
+        raise PromptChangeNotApplicable(
+            "non posso inserire una garanzia che un conto non possa azzerarsi o che qualunque capitale sia privo di rischio. "
+            "Posso spiegare il meccanismo di proporzione della size soltanto come descrizione tecnica, senza promettere un esito sul drawdown o sul capitale."
         )
     current = await active_master_prompt()
     release_name, release_revision = next_prompt_release(current.get("name"), name)
