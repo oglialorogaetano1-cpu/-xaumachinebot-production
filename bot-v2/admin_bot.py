@@ -6,6 +6,7 @@ executes a requested change before the administrator confirms it.
 """
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import os
@@ -605,9 +606,11 @@ async def execute_change(change):
             return False, "Il CRM ha salvato il testo ma non il nome della release confermata: nessun successo dichiarato."
         release = payload.get("release_revision")
         release_label = f"v.{release}" if release else str(active.get("name") or "versione senza etichetta")
+        fingerprint = hashlib.sha256(actual.encode("utf-8")).hexdigest()[:12]
         return True, (
-            f"Prompt attivo verificato: {release_label} · CRM {active.get('version')} · "
-            f"{len(str(active.get('content') or ''))} caratteri."
+            f"Applicata integralmente e verificata testo-per-testo: {release_label} · "
+            f"CRM {active.get('version')} · {len(str(active.get('content') or ''))} caratteri · "
+            f"impronta {fingerprint}."
         )
     return True, r.text[:1000]
 
