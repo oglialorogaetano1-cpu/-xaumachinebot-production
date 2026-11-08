@@ -213,15 +213,16 @@ su rischi, perdite o gestione del rischio. Se non hai un dato reale o non sai ri
 proponi il passaggio a un operatore umano.
 Se chiedono una verifica PU Prime e non esiste una verifica reale nei dati, rispondi:
 "Al momento non ti trovo dentro iscritto con noi su PU Prime, sei sicuro? Hai scritto bene nome e cognome?"
-Non dire "verifico" se non hai un dato reale. Quando chiedono la sala segnali, fornisci sempre il link ufficiale.
-Non inventare operazioni, TP1, TP2 o risultati: riportali solo se arrivano da una fonte reale sincronizzata."""
+Non dire "verifico" se non hai un dato reale.
+Non esiste una sala segnali: non offrire, descrivere o citare una sala, segnali manuali, TP1 o TP2.
+Per le performance usa solo dati reali restituiti dal worker MT5 autorizzato; non stimare rendimenti futuri."""
 
 PU_PRIME_NOT_FOUND = (
     "Al momento non ti trovo dentro iscritto con noi su PU Prime, sei sicuro? "
     "Hai scritto bene nome e cognome?"
 )
 
-DEFAULT_WELCOME_MESSAGE = "Ciao 👋 Benvenuto in XAU Machine! 🚀\n\nSe hai già le idee chiare e vuoi unirti a noi, ecco il percorso rapido 👇\n\n🆕 DEVI ANCORA REGISTRARTI?\n\n🔗 Registrati su PU Prime da questo link:\nhttps://puvip.co/la-partners/Pvzi1lQC\n\n• Lascia vuoto “Codice di riferimento”\n• Completa la verifica del documento\n• Inviami Nome e Cognome per controllare il collegamento ✅\n\n⚠️ Non depositare ancora: aspetta la mia conferma e la guida per aprire il conto corretto:\n\n• Copy Popular Trading\n• Standard\n• Valuta EUR\n• Nessun voucher\n\n♻️ HAI GIÀ PU PRIME?\n\nScrivimi prima di procedere. Ti guiderò nel trasferimento utilizzando il codice IB:\n\n👉 23217421\n\n📊 SALA SEGNALI — MANUALE\n\nAccesso gratuito per sole 24 ore dal primo ingresso. I segnali vengono pubblicati manualmente nella sala: non è un bot automatico e non copia le operazioni da solo 👇\n\nhttps://t.me/+-e1_tDFps0Q2YmE0\n\n🤖 BOT / COPY TRADING — AUTOMATICO\n\nIl bot è completamente automatico: una volta configurato sul conto corretto, esegue il copy trading in autonomia.\n\nSe vuoi iniziare subito, scrivimi cosa hai già fatto. Se invece vuoi conoscere risultati, rischi, differenze tra bot e sala segnali o capire come funziona tutto, chiedimi pure liberamente 😊"
+DEFAULT_WELCOME_MESSAGE = "Ciao 👋 Benvenuto in XAU Machine. Posso spiegarti come funziona il copy trading automatico, aiutarti con PU Prime oppure mostrarti dati storici disponibili. Da cosa vuoi partire?"
 
 # ---------------------------------------------------------- richieste MT5
 # Parole/frasi che fanno riconoscere una richiesta di vedere l'andamento
@@ -1409,7 +1410,6 @@ def _estrai_risposta_cliente(testo_ai: str) -> tuple[str, dict]:
 async def genera_risposta_ai(testo: str, contesto: dict) -> tuple[str, dict]:
     prompt_crm = (contesto.get("prompt") or "").strip()
     instructions = AI_RUNTIME_RULES
-    instructions += "\n\n" + await sala_segnali_contesto_ai()
     instructions += "\n\n" + puprime_prompt_context(contesto.get("puprime") or {})
     if prompt_crm:
         instructions += "\n\nPROMPT COMMERCIALE ATTIVO DAL CRM:\n" + prompt_crm
@@ -1524,7 +1524,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     if msg is None:
         return
-    await msg.reply_text("/registrazione - link e procedura\n/sala_segnali - informazioni sala\n/verifica_ib - verifica iscrizione\n/deposito - stato deposito\n/guida_bot - guida accesso\n/screenshot - richiedi aggiornamento MT5\n/intervento_umano - parla con un operatore")
+    await msg.reply_text("/registrazione - link e procedura\n/verifica_ib - verifica iscrizione\n/deposito - stato deposito\n/guida_bot - guida attivazione\n/screenshot - richiedi aggiornamento MT5\n/intervento_umano - parla con un operatore")
 
 async def simple_reply(update, text):
     msg = update.effective_message
@@ -1535,7 +1535,6 @@ async def simple_reply(update, text):
     await record_message(update, "out", text, "ai")
 
 async def registration(update, context): await simple_reply(update, "Per registrarti usa il link PU Prime indicato dal tuo referente. Dopo l'iscrizione scrivi qui e verifichiamo l'IB.")
-async def signals(update, context): await simple_reply(update, f"📊 Sala segnali XAU Machine — MANUALE\n\nAccedi da qui:\n{SIGNAL_ROOM_URL}\n\nAccesso gratuito per sole 24 ore dal primo ingresso. Le operazioni vengono pubblicate manualmente: la sala non esegue né copia automaticamente le operazioni.\n\n🤖 Il bot/copy trading, invece, è completamente automatico una volta configurato. Il trading comporta rischi e i risultati passati non garantiscono risultati futuri.")
 async def verify_ib(update, context):
     msg = update.effective_message
     if msg is None:
@@ -1559,7 +1558,7 @@ async def verify_ib(update, context):
     await msg.reply_text(risposta)
     await record_message(update, "out", risposta, "ai")
 async def deposit(update, context): await simple_reply(update, "Per assistenza sul deposito non inviare password o codici. Posso passare la richiesta a un operatore.")
-async def guide(update, context): await simple_reply(update, "Quando l'iscrizione sotto l'IB è verificata, riceverai la guida di accesso al bot e alla sala.")
+async def guide(update, context): await simple_reply(update, "Quando l'iscrizione sotto l'IB è verificata, riceverai la guida di attivazione della strategia XAU EXTREME GENIMI.")
 
 async def screenshot(update, context):
     msg = update.effective_message
@@ -1599,22 +1598,6 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         any(x in testo_lower for x in ("investor", "sola lettura")),
     )
     richiesta_composta = sum(categorie_richieste) >= 2
-    richiesta_report_sala = (
-        any(x in testo_lower for x in ("risultati", "risultato", "quanti tp", "quante tp", "quanti stop", "tp avete preso", "performance", "resoconto"))
-        and any(x in testo_lower for x in ("sala segnali", "sala signal", "signal room"))
-    )
-    if richiesta_report_sala and is_admin_chat(update.effective_chat.id):
-        # Il report numerico interno resta disponibile soltanto all'admin.
-        # Le domande dei clienti devono arrivare all'AI per ricevere una
-        # risposta completa, anche quando contengono la parola "risultati".
-        risposta = await sala_segnali_risultati(
-            _rileva_periodo_sala(testo),
-            _rileva_simbolo_sala(testo),
-        )
-        await record_message(update, "in", testo, "lead")
-        await msg.reply_text(risposta)
-        await record_message(update, "out", risposta, "ai")
-        return
     if not richiesta_composta and chiede_credenziali_investor_mt5(testo):
         risposta_credenziali = testo_credenziali_investor_mt5()
         await record_message(update, "in", testo, "lead")
@@ -2030,17 +2013,14 @@ async def post_init(app):
         ACTIVE_SUPPORT_FORUM_CHAT_ID = configured_forum
     log.info("Telegram support Forum configured: %s", bool(support_forum_chat_id()))
     app.create_task(poll_operator_outbox(app), name="crm-operator-outbox")
-    app.create_task(poll_signal_room_expirations(app), name="signal-room-24h-enforcement")
-    log.info("Signal room 24h enforcement enabled for %s", SIGNAL_ROOM_URL)
 
 def main():
     threading.Thread(target=start_health_server, daemon=True, name="health-server").start()
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     app.add_error_handler(on_error)
-    for cmd, fn in {"start":start,"help":help_cmd,"registrazione":registration,"sala_segnali":signals,"verifica_ib":verify_ib,"deposito":deposit,"guida_bot":guide,"screenshot":screenshot,"intervento_umano":human,"attiva_supporto":activate_support_forum,"statistiche_canale":channel_stats}.items():
+    for cmd, fn in {"start":start,"help":help_cmd,"registrazione":registration,"verifica_ib":verify_ib,"deposito":deposit,"guida_bot":guide,"screenshot":screenshot,"intervento_umano":human,"attiva_supporto":activate_support_forum,"statistiche_canale":channel_stats}.items():
         app.add_handler(CommandHandler(cmd, fn))
     app.add_handler(ChatJoinRequestHandler(channel_join_request))
-    app.add_handler(ChatMemberHandler(signal_room_member_update, ChatMemberHandler.CHAT_MEMBER))
     app.add_handler(CallbackQueryHandler(payment_review_callback, pattern=r"^pay:(?:approve|reject):"))
     app.add_handler(MessageHandler(filters.ChatType.SUPERGROUP, forum_operator_message), group=1)
     app.add_handler(MessageHandler(filters.PHOTO & filters.ChatType.PRIVATE, payment_screenshot_message))
