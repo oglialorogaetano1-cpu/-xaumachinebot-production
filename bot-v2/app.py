@@ -1711,6 +1711,13 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log.info("Messaggio Telegram ignorato da account bot: @%s", update.effective_user.username or update.effective_user.id)
         return
     testo = msg.text or ""
+    # Le chat ricevute tramite Telegram Business sono gestite soltanto
+    # dall'operatore nel relativo Topic privato: il bot fa da ponte, non
+    # risponde al cliente e non attiva l'assistente AI.
+    if getattr(msg, "business_connection_id", None):
+        await record_message(update, "in", testo, "lead")
+        log.info("Messaggio Business inoltrato al Topic senza risposta automatica: %s", update.effective_chat.id)
+        return
     testo_lower = testo.lower()
     categorie_richieste = (
         any(x in testo_lower for x in ("come funziona il bot", "bot automatico", "copy trading")),
