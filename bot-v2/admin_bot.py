@@ -9,6 +9,7 @@ import base64
 import json
 import logging
 import os
+import re
 import sqlite3
 import threading
 from contextlib import closing
@@ -74,7 +75,10 @@ verified_customer_action con payload.reference (username @utente oppure nome),
 send_installation_guide (booleano), body opzionale e activate_ai (booleano).
 Usalo quando l'amministratore chiede, ad esempio, "ho verificato @utente,
 manda la guida e attiva IA". Non richiedere ID tecnici: il sistema risolve il
-cliente dal CRM prima di preparare la conferma. reply e' obbligatorio:
+cliente dal CRM prima di preparare la conferma. L'amministratore non conosce
+gli ID Telegram: non chiederglieli mai per messaggi, guide, IA, Topic o
+follow-up. Se una ricerca non e' univoca, chiedi solo username, nome visibile
+o di inoltrare la chat/Topic. reply e' obbligatorio:
 deve essere una risposta conversazionale utile e completa alla domanda, mai
 una frase generica come "Ho analizzato la richiesta". Se non serve una modifica,
 imposta change a null ma rispondi comunque in modo concreto. Prepara una
@@ -856,6 +860,38 @@ async def prepare_verified_customer(update: Update, context: ContextTypes.DEFAUL
     await stage_change(update, prepared, summary)
 
 
+def natural_verified_customer_request(text):
+    """Recognise the common spoken/written verification instruction.
+
+    This deliberately runs before the planner so a simple request never falls
+    back to the old technical /invia flow that required CRM identifiers.
+    """
+    lowered = str(text or "").lower()
+    has_verification = any(word in lowered for word in ("verificato", "verificata", "verifica manuale"))
+    has_guide = any(word in lowered for word in ("guida", "installazione", "installa"))
+    if not (has_verification and has_guide):
+        return None
+    username = re.search(r"(?<!\w)@([a-z0-9_]{3,32})\b", lowered)
+    if username:
+        reference = "@" + username.group(1)
+    else:
+        # Covers phrases such as "manda la guida a gaetanoog" without asking
+        # the operator to know or type any numeric identifier.
+        recipient = re.search(r"(?:guida|installazione)\s+(?:a|ad|per)\s+([a-z0-9_]{3,32})\b", lowered)
+        if not recipient:
+            return None
+        reference = recipient.group(1)
+    return {
+        "action": "verified_customer_action",
+        "payload": {
+            "reference": reference,
+            "send_installation_guide": True,
+            "activate_ai": bool(re.search(r"attiv[ae]|riattiv[ae]", lowered) and "ia" in lowered),
+            "body": "",
+        },
+    }
+
+
 async def prepare_non_deposit_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not authorized(update):
         return
@@ -944,6 +980,31 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text):
         return
     chat_id = update.effective_chat.id
     remember(chat_id, "user", text)
+    direct_change = natural_verified_customer_request(text)
+    if direct_change:
+        try:
+            prepared, summary = await prepare_verified_customer_action(update, direct_change)
+        except ValueError as exc:
+            reply = (
+                "Non ho bisogno di alcun ID Telegram. " + str(exc) +
+                " Inviami solo l'username, il nome visibile oppure inoltrami la chat."
+            )
+            remember(chat_id, "assistant", reply)
+            await update.effective_message.reply_text(reply)
+            return
+        except Exception:
+            log.exception("Natural verified customer resolution failed")
+            await update.effective_message.reply_text(
+                "⚠️ Non riesco a cercare il cliente nel CRM in questo momento; non ho preparato alcun invio."
+            )
+            return
+        reply = summary + "\n\nModifica preparata. Usa /conferma per inviare la guida e applicare le azioni indicate, oppure /annulla."
+        with closing(sqlite3.connect(DB_PATH)) as conn:
+            conn.execute("INSERT OR REPLACE INTO pending_changes(chat_id,payload,created_at) VALUES(?,?,?)", (str(chat_id), json.dumps(prepared), now()))
+            conn.commit()
+        remember(chat_id, "assistant", reply)
+        await update.effective_message.reply_text(reply)
+        return
     try:
         result = await openai_json(chat_id, text)
     except Exception as exc:
