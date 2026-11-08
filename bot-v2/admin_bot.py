@@ -235,6 +235,12 @@ def history(chat_id):
 
 
 def authorized(update):
+    # The administrator bot is intentionally private-only.  It must never
+    # answer an authorised operator inside a customer Topic or group, where a
+    # reply would interfere with the human conversation.
+    chat = update.effective_chat
+    if not chat or getattr(chat, "type", "") != "private":
+        return False
     if not update.effective_user:
         return False
     user_id = str(update.effective_user.id)
