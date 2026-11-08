@@ -820,7 +820,20 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text):
 
 
 async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await handle_text(update, context, update.effective_message.text or "")
+    """Treat a forwarded message as source material, not as a question to echo."""
+    msg = update.effective_message
+    text = msg.text or ""
+    is_forwarded = bool(getattr(msg, "forward_origin", None) or getattr(msg, "forward_date", None))
+    if is_forwarded:
+        text = (
+            "Questo e' un messaggio inoltrato dall'amministratore. Analizzalo come materiale "
+            "di lavoro per CRM/prompt/topic/follow-up. Non ripetere, non tradurre e non "
+            "parafrasare il testo. Rispondi con: (1) cosa contiene in una riga, (2) quale "
+            "area puo' essere migliorata, (3) una sola domanda concreta su cosa l'amministratore "
+            "vuole modificare. Non preparare alcuna modifica finche' non ricevi un'istruzione "
+            "esplicita. change deve essere null.\n\nTESTO INOLTRATO:\n" + text
+        )
+    await handle_text(update, context, text)
 
 
 async def voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
