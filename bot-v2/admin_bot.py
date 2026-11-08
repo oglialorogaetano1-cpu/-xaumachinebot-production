@@ -250,11 +250,20 @@ async def reconcile_prompt_change(name, requested_change):
     content = str(result.get("content") or "").strip()
     if len(content) < 100:
         raise RuntimeError("Revisione prompt incompleta")
+    raw_conflicts = result.get("conflicts_resolved")
+    if isinstance(raw_conflicts, list):
+        conflicts_resolved = [str(item) for item in raw_conflicts if str(item).strip()]
+    elif raw_conflicts is True:
+        conflicts_resolved = ["Regole del prompt compatibilizzate"]
+    elif isinstance(raw_conflicts, str) and raw_conflicts.strip():
+        conflicts_resolved = [raw_conflicts.strip()]
+    else:
+        conflicts_resolved = []
     return {
         "name": str(result.get("name") or name or "Prompt XAU Machine")[:160],
         "content": content,
         "summary": str(result.get("summary") or "Modifica integrata nel prompt completo.")[:1400],
-        "conflicts_resolved": result.get("conflicts_resolved") or [],
+        "conflicts_resolved": conflicts_resolved,
     }
 
 
@@ -749,6 +758,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text):
         if change.get("action") == "prompt_update":
             payload = change.get("payload") or {}
             try:
+                await update.effective_message.reply_text(
+                    "⏳ Sto leggendo il prompt master completo e inserendo la regola nella sezione corretta."
+                )
                 reviewed = await reconcile_prompt_change(
                     str(payload.get("name") or "Prompt XAU Machine"),
                     str(payload.get("content") or ""),
