@@ -423,11 +423,15 @@ async def execute_change(change):
         elif action == "verified_customer_action":
             chat_id = str(payload["telegram_chat_id"])
             body = str(payload["body"])[:8000]
-            tenant_id = await crm_tenant_id()
             queued = await client.post(
-                f"{SUPABASE_URL}/rest/v1/crm_operator_outbox",
-                headers={**headers, "Prefer": "return=representation"},
-                json={"tenant_id": tenant_id, "tenant_slug": TENANT_SLUG, "telegram_chat_id": chat_id, "body": body},
+                f"{SUPABASE_URL}/rest/v1/rpc/crm_enqueue_operator_message_from_telegram",
+                headers=headers,
+                json={
+                    "p_secret": CRM_SECRET,
+                    "p_tenant_slug": TENANT_SLUG,
+                    "p_telegram_chat_id": int(chat_id),
+                    "p_body": body,
+                },
             )
             if queued.status_code >= 300:
                 return False, f"Coda Telegram rifiutata ({queued.status_code})."
@@ -439,17 +443,10 @@ async def execute_change(change):
                 )
                 if ai.status_code >= 300:
                     return False, f"Guida in coda, ma CRM ha rifiutato la riattivazione IA ({ai.status_code})."
-            conversation_id = payload.get("conversation_id")
-            if conversation_id:
-                r = await client.post(
-                    f"{SUPABASE_URL}/rest/v1/crm_messages",
-                    headers=headers,
-                    json={"conversation_id": conversation_id, "tenant_id": tenant_id, "direction": "outbound", "sender_type": "human", "body": body},
-                )
-            else:
-                # Delivery remains valid when legacy customer data has no linked
-                # conversation; the outbox is authoritative for Telegram send.
-                r = queued
+            # The protected queue is the delivery authority.  Do not turn a
+            # successful customer send into a false failure merely because an
+            # optional direct history write is blocked by CRM RLS.
+            r = queued
         elif action == "lead_create":
             r = await client.post(f"{SUPABASE_URL}/rest/v1/crm_leads", headers={**headers, "Prefer": "return=representation"}, json=payload)
         elif action == "lead_update":
