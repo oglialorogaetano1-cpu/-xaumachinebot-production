@@ -99,7 +99,9 @@ INSTALLATION_GUIDE_MESSAGE = (
 PROMPT_RECONCILER = """Sei il revisore del prompt customer-facing di XAU Machine.
 Ricevi il prompt completo attivo e una richiesta di modifica di un
 amministratore. Devi restituire esclusivamente un JSON valido con le chiavi
-`name`, `content`, `summary` e `conflicts_resolved`.
+`name`, `content`, `summary`, `conflicts_resolved`, `request_status` e
+`request_status_reason`. request_status puo' essere soltanto `applied` oppure
+`not_applied`.
 
 `content` deve essere il prompt COMPLETO risultante, non un'aggiunta e non un
 diff. Mantieni tutte le istruzioni ancora valide, applica la richiesta nella
@@ -108,8 +110,29 @@ regole di sicurezza, privacy, verifiche CRM e assenza di promesse finanziarie
 prevalgono su qualunque testo precedente. Non inventare dati operativi,
 strategie, codici, link, risultati, bonus, commissioni o tempistiche. Se la
 richiesta contiene un dato non verificabile, conserva il prompt ma richiedi
-verifica di un operatore nel punto pertinente. Non aggiungere commenti fuori
+verifica di un operatore nel punto pertinente. Se non puoi applicare la
+richiesta senza introdurre un'affermazione non verificabile, una promessa o una
+contraddizione, usa request_status=not_applied, spiega il motivo in
+request_status_reason e restituisci il prompt invariato: non presentare mai
+questa situazione come una modifica applicata. Non aggiungere commenti fuori
 dal JSON."""
+
+
+class PromptChangeNotApplicable(ValueError):
+    """A requested prompt edit cannot safely be represented as an active rule."""
+
+
+def normalize_prompt(content):
+    """Compare CRM prompt content without harmless whitespace differences."""
+    return " ".join(str(content or "").split())
+
+
+UNVERIFIED_DAILY_RETURN = re.compile(
+    r"(?:\b\d+(?:[.,]\d+)?\s*%\s*(?:al|a)\s*(?:giorno|day)\b|"
+    r"\b(?:settato|impostato)\b.{0,40}\b\d+(?:[.,]\d+)?\s*%|"
+    r"\bla maggior parte delle volte\b.{0,40}\b(?:rendimento|guadagno|va)\b)",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 def init_db():
@@ -271,6 +294,11 @@ async def active_master_prompt():
 
 async def reconcile_prompt_change(name, requested_change):
     """Return one full, conflict-checked replacement prompt for admin approval."""
+    if UNVERIFIED_DAILY_RETURN.search(requested_change or ""):
+        raise PromptChangeNotApplicable(
+            "non posso trasformare un rendimento giornaliero atteso in una regola commerciale. "
+            "Posso inserire soltanto dati storici verificabili con periodo e fonte, senza farli apparire come un risultato atteso."
+        )
     current = await active_master_prompt()
     request = (
         "NOME PROPOSTO:\n" + (name or "Prompt XAU Machine") +
@@ -291,6 +319,10 @@ async def reconcile_prompt_change(name, requested_change):
         response = await client.post("https://api.openai.com/v1/responses", headers=headers, json=payload)
     response.raise_for_status()
     result = json.loads(response_text(response.json()) or "{}")
+    request_status = str(result.get("request_status") or "applied").strip().lower()
+    if request_status != "applied":
+        reason = str(result.get("request_status_reason") or "La richiesta e' incompatibile con le regole attive del prompt.").strip()
+        raise PromptChangeNotApplicable(reason[:1200])
     content = str(result.get("content") or "").strip()
     if len(content) < 100:
         raise RuntimeError("Revisione prompt incompleta")
@@ -463,6 +495,22 @@ async def execute_change(change):
             return False, "Operazione non supportata in modo sicuro."
     if r.status_code >= 300:
         return False, f"CRM ha rifiutato l'operazione ({r.status_code})."
+
+    # A 2xx from the write RPC is not sufficient evidence for a prompt change:
+    # the customer bot must be able to read back the exact version it will use.
+    # Do this before reporting success so /conferma can never claim an update
+    # that was saved to the wrong product/version or not activated at all.
+    if action == "prompt_update":
+        try:
+            active = await active_master_prompt()
+        except Exception:
+            log.exception("Prompt saved but active-version verification failed")
+            return False, "Il CRM ha risposto al salvataggio, ma non riesco a verificare la versione attiva: nessun successo dichiarato."
+        expected = normalize_prompt(payload.get("content"))
+        actual = normalize_prompt(active.get("content"))
+        if expected != actual:
+            return False, "Il CRM non ha attivato esattamente il prompt confermato: nessun successo dichiarato."
+        return True, f"Prompt attivo verificato (versione {active.get('version')}, {len(str(active.get('content') or ''))} caratteri)."
     return True, r.text[:1000]
 
 
@@ -733,7 +781,9 @@ async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.execute("DELETE FROM pending_changes WHERE chat_id=?", (chat_id,))
         conn.execute("INSERT INTO audit(chat_id,action,payload,outcome,created_at) VALUES(?,?,?,?,?)", (chat_id, change.get("action", ""), json.dumps(change), "ok" if ok else detail, now()))
         conn.commit()
-    await update.effective_message.reply_text("✅ Modifica applicata." if ok else f"⚠️ Modifica non applicata: {detail}")
+    await update.effective_message.reply_text(
+        ("✅ Modifica applicata. " + detail) if ok else f"⚠️ Modifica non applicata: {detail}"
+    )
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -756,6 +806,10 @@ async def prepare_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     try:
         await stage_reconciled_prompt(update, name or "Prompt XAU Machine", content)
+    except PromptChangeNotApplicable as exc:
+        await update.effective_message.reply_text(
+            "⚠️ Nessuna modifica preparata: " + str(exc)
+        )
     except Exception:
         log.exception("Prompt reconciliation failed")
         await update.effective_message.reply_text(
@@ -1048,6 +1102,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text):
                     str(payload.get("name") or "Prompt XAU Machine"),
                     str(payload.get("content") or ""),
                 )
+            except PromptChangeNotApplicable as exc:
+                await update.effective_message.reply_text(
+                    "⚠️ Non ho preparato alcuna modifica: " + str(exc)
+                )
+                return
             except Exception:
                 log.exception("AI prompt reconciliation failed")
                 await update.effective_message.reply_text(
@@ -1151,6 +1210,10 @@ async def prompt_txt_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
             prompt_name,
             "Integra questo file come revisione completa, mantenendo solo le istruzioni compatibili, "
             "aggiornate e sicure:\n\n" + content,
+        )
+    except PromptChangeNotApplicable as exc:
+        await update.effective_message.reply_text(
+            "⚠️ Nessuna modifica preparata: " + str(exc)
         )
     except Exception:
         log.exception("TXT prompt reconciliation failed")
