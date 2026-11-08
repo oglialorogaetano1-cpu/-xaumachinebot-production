@@ -735,8 +735,11 @@ async def crm_set_ai_control(chat_id: int, mode: str) -> dict:
 async def google_translate_from_italian(text: str, target_language: str) -> tuple[str, bool]:
     """Traduce con Google Cloud Translation; non usa il modello conversazionale."""
     target = (target_language or "it").split("-", 1)[0].lower()
-    if target in ("", "it") or not GOOGLE_TRANSLATE_API_KEY:
-        return text, target in ("", "it")
+    if target in ("", "it"):
+        return text, True
+    if not GOOGLE_TRANSLATE_API_KEY:
+        log.warning("Google Translate non configurato; uso il fallback CRM per %s", target)
+        return await ai_translate_from_italian(text, target)
     try:
         async with httpx.AsyncClient(timeout=12) as client:
             r = await client.post(
@@ -746,11 +749,52 @@ async def google_translate_from_italian(text: str, target_language: str) -> tupl
             )
         if r.status_code >= 300:
             log.warning("Google Translate fallito %s: %s", r.status_code, r.text[:200])
-            return text, False
+            return await ai_translate_from_italian(text, target)
         translated = (((r.json().get("data") or {}).get("translations") or [{}])[0].get("translatedText") or "").strip()
-        return (translated or text), bool(translated)
+        if translated:
+            return translated, True
+        log.warning("Google Translate ha restituito una traduzione vuota per %s", target)
+        return await ai_translate_from_italian(text, target)
     except Exception as exc:
         log.warning("Google Translate non disponibile: %s", exc)
+        return await ai_translate_from_italian(text, target)
+
+
+async def ai_translate_from_italian(text: str, target_language: str) -> tuple[str, bool]:
+    """Reliable private fallback when Google Translate is unavailable."""
+    if not CRM_TRACKING_SECRET:
+        return text, False
+    target = (target_language or "").split("-", 1)[0].lower()
+    if not target or target == "it":
+        return text, True
+    instructions = (
+        f"Traduci fedelmente il seguente messaggio dall'italiano in {target}. "
+        "Restituisci solo la traduzione, senza prefazioni, emoji, spiegazioni "
+        "o consigli. Mantieni invariati URL, nomi, importi e codici."
+    )
+    try:
+        async with httpx.AsyncClient(timeout=25) as client:
+            r = await client.post(
+                f"{SUPABASE_URL}/functions/v1/crm-ai-chat",
+                headers={
+                    "apikey": SUPABASE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "runtime_secret": CRM_TRACKING_SECRET,
+                    "tenant_slug": CRM_TENANT_SLUG,
+                    "instructions": instructions,
+                    "input": [{"role": "user", "content": text[:3900]}],
+                },
+            )
+        if r.status_code >= 300:
+            log.warning("Fallback traduzione CRM fallito %s: %s", r.status_code, r.text[:200])
+            return text, False
+        translated = str((r.json() or {}).get("text") or "").strip()
+        return (translated or text), bool(translated)
+    except Exception as exc:
+        log.warning("Fallback traduzione CRM non disponibile: %s", exc)
         return text, False
 
 
@@ -1004,7 +1048,7 @@ async def forum_operator_message(update: Update, context: ContextTypes.DEFAULT_T
                 business_connection_id=mapping.get("business_connection_id"),
             )
             if str(mapping.get("language") or "it") != "it" and not translated:
-                await msg.reply_text("⚠️ Google Translate non disponibile: il messaggio e' stato inviato in italiano.")
+                await msg.reply_text("⚠️ Traduzione non disponibile: il messaggio e' stato inviato in italiano.")
         else:
             business_connection_id = mapping.get("business_connection_id")
             if business_connection_id and msg.photo:
