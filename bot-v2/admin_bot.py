@@ -172,6 +172,11 @@ UNVERIFIED_DAILY_RETURN = re.compile(
     r"\bla maggior parte delle volte\b.{0,40}\b(?:rendimento|guadagno|va)\b)",
     re.IGNORECASE | re.DOTALL,
 )
+OPERATING_TARGET_WITH_DISCLAIMER = re.compile(
+    r"(?:obiettivo|target)\s+operativ\w*.{0,80}\b\d+(?:[.,]\d+)?\s*%\s*(?:al|a)\s*(?:giorno|day)\b"
+    r".{0,240}\b(?:non\s+[èe]\s+(?:una\s+)?garanzi\w*|risultati\s+(?:possono|potrebbero)\s+vari\w*)",
+    re.IGNORECASE | re.DOTALL,
+)
 UNSAFE_CAPITAL_ASSURANCE = re.compile(
     r"(?:senza\s+rischio\s+(?:di\s+)?(?:bruciare|azzerare)\s+(?:il\s+)?conto|"
     r"(?:conto|capitale).{0,80}\b(?:non\s+pu[oò]|impossibile)\s+(?:bruciare|azzerarsi|andare\s+a\s+zero)|"
@@ -352,7 +357,10 @@ async def active_master_prompt():
 
 async def reconcile_prompt_change(name, requested_change):
     """Return one full, conflict-checked replacement prompt for admin approval."""
-    if UNVERIFIED_DAILY_RETURN.search(requested_change or ""):
+    if (
+        UNVERIFIED_DAILY_RETURN.search(requested_change or "")
+        and not OPERATING_TARGET_WITH_DISCLAIMER.search(requested_change or "")
+    ):
         raise PromptChangeNotApplicable(
             "non posso trasformare un rendimento giornaliero atteso in una regola commerciale. "
             "Posso inserire soltanto dati storici verificabili con periodo e fonte, senza farli apparire come un risultato atteso."
