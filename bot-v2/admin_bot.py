@@ -50,7 +50,12 @@ oggetto con action tra prompt_update, ai_control, topic_lookup, topic_update,
 sales_send, sales_broadcast, lead_create, lead_update, channel_create,
 followup_rule_create e conversation_update.
 Per prompt_update usa payload.content, name e language; per ai_control usa
-payload.chat_id e mode (on, off, pause_1h). Per topic_update usa
+payload.chat_id e mode (on, off, pause_1h): chat_id deve essere sempre un ID
+Telegram numerico reale, mai parole come "all_clients" o "cliente_corrente".
+Non usare ai_control per modifiche globali del comportamento del bot o per
+sopprimere notifiche: se non esiste un'azione applicabile, lascia change null
+e spiega chiaramente che la modifica tecnica verra' applicata separatamente.
+Per topic_update usa
 telegram_user_id, telegram_chat_id, message_thread_id e topic_name. Per
 sales_send usa telegram_chat_id, conversation_id e body. Non inviare mai un
 messaggio al cliente senza far usare /conferma. Quando l'amministratore chiede
@@ -158,6 +163,13 @@ def valid_change(change):
     missing = [key for key in required.get(change.get("action"), ()) if not str(payload.get(key) or "").strip()]
     if missing:
         return False, ", ".join(missing)
+    if change.get("action") == "ai_control":
+        try:
+            int(str(payload.get("chat_id")))
+        except (TypeError, ValueError):
+            return False, "chat_id deve essere un ID Telegram numerico"
+        if str(payload.get("mode")) not in {"on", "off", "pause_1h", "stop"}:
+            return False, "mode IA non valido"
     return True, ""
 
 
@@ -347,7 +359,11 @@ async def execute_change(change):
     headers = supabase_headers()
     async with httpx.AsyncClient(timeout=20) as client:
         if action == "ai_control":
-            r = await client.post(f"{SUPABASE_URL}/rest/v1/rpc/crm_set_ai_control", headers=headers, json={"p_secret": CRM_SECRET, "p_tenant_slug": "xau-machine", "p_telegram_chat_id": int(payload["chat_id"]), "p_mode": payload["mode"]})
+            try:
+                target_chat_id = int(str(payload["chat_id"]))
+            except (KeyError, TypeError, ValueError):
+                return False, "chat_id deve essere un ID Telegram numerico; nessuna modifica e' stata applicata."
+            r = await client.post(f"{SUPABASE_URL}/rest/v1/rpc/crm_set_ai_control", headers=headers, json={"p_secret": CRM_SECRET, "p_tenant_slug": "xau-machine", "p_telegram_chat_id": target_chat_id, "p_mode": payload["mode"]})
         elif action == "topic_lookup":
             r = await client.post(f"{SUPABASE_URL}/rest/v1/rpc/crm_get_telegram_topic", headers=headers, json={"p_secret": CRM_SECRET, "p_tenant_slug": "xau-machine", "p_forum_chat_id": int(forum_id), "p_telegram_user_id": int(payload.get("telegram_user_id")) if payload.get("telegram_user_id") else None, "p_message_thread_id": int(payload.get("message_thread_id")) if payload.get("message_thread_id") else None} )
         elif action == "prompt_update":
@@ -540,9 +556,13 @@ async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     change = json.loads(row[0])
     is_valid, missing = valid_change(change)
     if is_valid:
-        ok, detail = await execute_change(change)
+        try:
+            ok, detail = await execute_change(change)
+        except Exception:
+            log.exception("Conferma modifica non riuscita")
+            ok, detail = False, "Errore tecnico durante l'applicazione; nessuna modifica e' stata applicata."
     else:
-        ok, detail = False, "Bozza incompleta annullata: mancano " + missing + "."
+        ok, detail = False, "Bozza non applicabile annullata: " + missing + "."
     with closing(sqlite3.connect(DB_PATH)) as conn:
         conn.execute("DELETE FROM pending_changes WHERE chat_id=?", (chat_id,))
         conn.execute("INSERT INTO audit(chat_id,action,payload,outcome,created_at) VALUES(?,?,?,?,?)", (chat_id, change.get("action", ""), json.dumps(change), "ok" if ok else detail, now()))
