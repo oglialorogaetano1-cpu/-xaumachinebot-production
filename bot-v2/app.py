@@ -25,6 +25,7 @@ SUPPORT_FORUM_CHAT_ID = os.environ.get("SUPPORT_FORUM_CHAT_ID", "").strip()
 ACTIVE_SUPPORT_FORUM_CHAT_ID = SUPPORT_FORUM_CHAT_ID
 CRM_TRACKING_SECRET = os.environ.get("CRM_TRACKING_SECRET", "")
 CRM_TENANT_SLUG = os.environ.get("CRM_TENANT_SLUG", "xau-machine")
+FOLLOWUP_AUTOMATION_ENABLED = os.environ.get("FOLLOWUP_AUTOMATION_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
 MT5_INVESTOR_PLATFORM = os.environ.get("MT5_INVESTOR_PLATFORM", "")
 MT5_INVESTOR_BROKER = os.environ.get("MT5_INVESTOR_BROKER", "")
 MT5_INVESTOR_SERVER = os.environ.get("MT5_INVESTOR_SERVER", "")
@@ -1178,6 +1179,57 @@ async def poll_operator_outbox(app) -> None:
         await asyncio.sleep(5)
 
 
+async def smart_followup_sweep() -> None:
+    """Claim due follow-ups, write a contextual draft, then queue it safely."""
+    if not FOLLOWUP_AUTOMATION_ENABLED or not CRM_TRACKING_SECRET:
+        return
+    headers = dict(CRM_HEADERS); headers.pop("Prefer", None)
+    async with httpx.AsyncClient(timeout=25) as client:
+        claimed = await client.post(
+            f"{SUPABASE_URL}/rest/v1/rpc/crm_claim_due_followups_from_telegram",
+            headers=headers,
+            json={"p_secret": CRM_TRACKING_SECRET, "p_tenant_slug": CRM_TENANT_SLUG, "p_limit": 5},
+        )
+    if claimed.status_code >= 300:
+        log.warning("Claim follow-up non disponibile %s: %s", claimed.status_code, claimed.text[:180])
+        return
+    for row in claimed.json() or []:
+        followup_id = row.get("followup_id")
+        try:
+            history = row.get("recent_messages") or []
+            instruction = str(row.get("instruction") or "").strip()
+            request = (
+                "Scrivi SOLO il prossimo follow-up per il cliente, nella sua lingua. "
+                "Usa il contesto della conversazione e questo obiettivo: " + instruction + ". "
+                "Sii breve, naturale, non pressante; non inventare dati o risultati e non citare automazioni. "
+                "Se non e' opportuno ricontattarlo, rispondi esattamente [CANCEL]."
+            )
+            body, _ = await genera_risposta_ai(request, {"history": history})
+            cancel = body.strip() == "[CANCEL]"
+            async with httpx.AsyncClient(timeout=20) as client:
+                done = await client.post(
+                    f"{SUPABASE_URL}/rest/v1/rpc/crm_complete_followup_from_telegram",
+                    headers=headers,
+                    json={"p_secret": CRM_TRACKING_SECRET, "p_tenant_slug": CRM_TENANT_SLUG,
+                          "p_followup_id": followup_id, "p_body": None if cancel else body,
+                          "p_error": "not_appropriate" if cancel else None, "p_cancel": cancel},
+                )
+            if done.status_code >= 300:
+                log.warning("Completamento follow-up %s rifiutato: %s", followup_id, done.text[:180])
+        except Exception as exc:
+            log.warning("Generazione follow-up %s fallita: %s", followup_id, exc)
+
+
+async def poll_smart_followups() -> None:
+    await asyncio.sleep(12)
+    while True:
+        try:
+            await smart_followup_sweep()
+        except Exception:
+            log.exception("Sweep follow-up fallito")
+        await asyncio.sleep(60)
+
+
 # --- Sala segnali: risultati reali da Supabase (mai inventati) ---
 _SIGNAL_SYMBOL_ALIASES = {"GOLD":"XAUUSD","ORO":"XAUUSD","XAU":"XAUUSD","XAUUSD":"XAUUSD","SILVER":"XAGUSD","ARGENTO":"XAGUSD","XAG":"XAGUSD","XAGUSD":"XAGUSD"}
 _PERIODO_LABEL = {"day":"di oggi","week":"di questa settimana","month":"di questo mese"}
@@ -2013,6 +2065,7 @@ async def post_init(app):
         ACTIVE_SUPPORT_FORUM_CHAT_ID = configured_forum
     log.info("Telegram support Forum configured: %s", bool(support_forum_chat_id()))
     app.create_task(poll_operator_outbox(app), name="crm-operator-outbox")
+    app.create_task(poll_smart_followups(), name="crm-smart-followups")
 
 def main():
     threading.Thread(target=start_health_server, daemon=True, name="health-server").start()
