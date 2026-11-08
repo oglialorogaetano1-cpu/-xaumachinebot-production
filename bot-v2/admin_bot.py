@@ -35,6 +35,10 @@ SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 CRM_SECRET = os.environ["CRM_TRACKING_SECRET"]
 TENANT_SLUG = os.environ.get("CRM_TENANT_SLUG", "xau-machine").strip()
 SUPPORT_FORUM_CHAT_ID = os.environ.get("SUPPORT_FORUM_CHAT_ID", "").strip()
+AI_TRADER_GUIDE_IT_URL = os.environ.get(
+    "AI_TRADER_GUIDE_IT_URL",
+    "https://ai-trader-mt5-checkout.vercel.app/guides/AI_Trader_MT5_Guida_Installazione_IT.pdf",
+).strip()
 ADMIN_IDS = {item.strip() for item in os.environ.get("ADMIN_CHAT_ID", "").split(",") if item.strip()}
 BOOTSTRAP_CODE = os.environ.get("ADMIN_BOOTSTRAP_CODE", "")
 DB_PATH = Path(os.environ.get("ADMIN_MEMORY_DB", "/data/admin-bot.sqlite3"))
@@ -47,8 +51,8 @@ analizzare prompt, conversazioni, topic, traduzioni e stato AI. Non inventare
 azioni riuscite: per ogni modifica proponi una sintesi precisa e chiedi
 conferma. Rispondi in JSON con chiavi reply e change. change e' null oppure un
 oggetto con action tra prompt_update, ai_control, topic_lookup, topic_update,
-sales_send, sales_broadcast, lead_create, lead_update, channel_create,
-followup_rule_create e conversation_update.
+sales_send, sales_broadcast, verified_customer_action, lead_create, lead_update,
+channel_create, followup_rule_create e conversation_update.
 Per prompt_update usa payload.content, name e language; per ai_control usa
 payload.chat_id e mode (on, off, pause_1h): chat_id deve essere sempre un ID
 Telegram numerico reale, mai parole come "all_clients" o "cliente_corrente".
@@ -64,7 +68,13 @@ sales_send usa telegram_chat_id, conversation_id e body. Non inviare mai un
 messaggio al cliente senza far usare /conferma. Quando l'amministratore chiede
 di contattare tutti i clienti senza deposito, usa sales_broadcast con
 payload.segment="not_deposited" e payload.body. Non usare sales_broadcast per
-un segmento diverso senza chiedere prima un chiarimento. reply e' obbligatorio:
+un segmento diverso senza chiedere prima un chiarimento. Per una verifica
+manuale di un singolo cliente, guida/istruzioni e riattivazione IA usa
+verified_customer_action con payload.reference (username @utente oppure nome),
+send_installation_guide (booleano), body opzionale e activate_ai (booleano).
+Usalo quando l'amministratore chiede, ad esempio, "ho verificato @utente,
+manda la guida e attiva IA". Non richiedere ID tecnici: il sistema risolve il
+cliente dal CRM prima di preparare la conferma. reply e' obbligatorio:
 deve essere una risposta conversazionale utile e completa alla domanda, mai
 una frase generica come "Ho analizzato la richiesta". Se non serve una modifica,
 imposta change a null ma rispondi comunque in modo concreto. Prepara una
@@ -72,6 +82,15 @@ modifica soltanto se l'amministratore l'ha richiesta in modo esplicito e i
 parametri necessari sono completi. Non dichiarare mai di non avere accesso alle
 conversazioni CRM: per analizzarne una, guida l'amministratore a usare
 /conversazioni e /analizza <id> quando manca l'identificativo."""
+
+# The installation guide is intentionally a fixed, operator-approved asset. A
+# planner may request it, but cannot provide an arbitrary URL by itself.
+INSTALLATION_GUIDE_MESSAGE = (
+    "✅ La verifica manuale è completata.\n\n"
+    "Puoi procedere con l'installazione seguendo questa guida:\n"
+    f"{AI_TRADER_GUIDE_IT_URL}\n\n"
+    "Quando hai completato i passaggi, rispondi qui e ti assistiamo nel passaggio successivo."
+)
 
 PROMPT_RECONCILER = """Sei il revisore del prompt customer-facing di XAU Machine.
 Ricevi il prompt completo attivo e una richiesta di modifica di un
@@ -157,6 +176,7 @@ def valid_change(change):
         "topic_update": ("telegram_user_id", "telegram_chat_id", "message_thread_id", "topic_name"),
         "sales_send": ("telegram_chat_id", "conversation_id", "body"),
         "sales_broadcast": ("segment", "body"),
+        "verified_customer_action": ("telegram_chat_id", "body"),
         "lead_create": ("full_name",),
         "lead_update": ("id",),
         "channel_create": ("name", "telegram_url", "campaign_code"),
@@ -173,6 +193,11 @@ def valid_change(change):
             return False, "chat_id deve essere un ID Telegram numerico"
         if str(payload.get("mode")) not in {"on", "off", "pause_1h", "stop"}:
             return False, "mode IA non valido"
+    if change.get("action") == "verified_customer_action":
+        try:
+            int(str(payload.get("telegram_chat_id")))
+        except (TypeError, ValueError):
+            return False, "cliente Telegram non risolto"
     return True, ""
 
 
@@ -391,6 +416,36 @@ async def execute_change(change):
             if queued.status_code >= 300:
                 return False, f"Coda Telegram rifiutata ({queued.status_code})."
             r = await client.post(f"{SUPABASE_URL}/rest/v1/crm_messages", headers=headers, json={"conversation_id": payload["conversation_id"], "tenant_id": tenant_id, "direction": "outbound", "sender_type": "human", "body": body})
+        elif action == "verified_customer_action":
+            chat_id = str(payload["telegram_chat_id"])
+            body = str(payload["body"])[:8000]
+            tenant_id = await crm_tenant_id()
+            queued = await client.post(
+                f"{SUPABASE_URL}/rest/v1/crm_operator_outbox",
+                headers={**headers, "Prefer": "return=representation"},
+                json={"tenant_id": tenant_id, "tenant_slug": TENANT_SLUG, "telegram_chat_id": chat_id, "body": body},
+            )
+            if queued.status_code >= 300:
+                return False, f"Coda Telegram rifiutata ({queued.status_code})."
+            if payload.get("activate_ai"):
+                ai = await client.post(
+                    f"{SUPABASE_URL}/rest/v1/rpc/crm_set_ai_control",
+                    headers=headers,
+                    json={"p_secret": CRM_SECRET, "p_tenant_slug": TENANT_SLUG, "p_telegram_chat_id": int(chat_id), "p_mode": "on"},
+                )
+                if ai.status_code >= 300:
+                    return False, f"Guida in coda, ma CRM ha rifiutato la riattivazione IA ({ai.status_code})."
+            conversation_id = payload.get("conversation_id")
+            if conversation_id:
+                r = await client.post(
+                    f"{SUPABASE_URL}/rest/v1/crm_messages",
+                    headers=headers,
+                    json={"conversation_id": conversation_id, "tenant_id": tenant_id, "direction": "outbound", "sender_type": "human", "body": body},
+                )
+            else:
+                # Delivery remains valid when legacy customer data has no linked
+                # conversation; the outbox is authoritative for Telegram send.
+                r = queued
         elif action == "lead_create":
             r = await client.post(f"{SUPABASE_URL}/rest/v1/crm_leads", headers={**headers, "Prefer": "return=representation"}, json=payload)
         elif action == "lead_update":
@@ -417,6 +472,109 @@ async def crm_get(path, params):
     r.raise_for_status()
     data = r.json()
     return data if isinstance(data, list) else []
+
+
+async def resolve_customer_reference(reference):
+    """Resolve @username/name to the private Telegram chat without exposing IDs.
+
+    Topics are the most reliable username index because their titles are built
+    from the user's Telegram identity.  Older CRM data can instead have the
+    username on the lead under either historical column name, so both are
+    tried safely.  A match must be unique before an outbound action is staged.
+    """
+    ref = str(reference or "").strip().lstrip("@").lower()
+    if len(ref) < 2:
+        raise ValueError("Indica un username Telegram o un nome cliente valido.")
+
+    candidates = []
+    try:
+        rows = await crm_get("crm_telegram_topics", {
+            "select": "telegram_user_id,telegram_chat_id,topic_name",
+            "topic_name": f"ilike.*{ref}*",
+            "limit": "10",
+        })
+        for row in rows:
+            topic_name = str(row.get("topic_name") or "").lower()
+            # A substring in an unrelated full name is not a safe recipient.
+            if f"@{ref}" in topic_name or topic_name.strip() == ref:
+                candidates.append({
+                    "chat_id": row.get("telegram_chat_id") or row.get("telegram_user_id"),
+                    "user_id": row.get("telegram_user_id"),
+                    "name": row.get("topic_name") or f"@{ref}",
+                    "lead_id": None,
+                })
+    except httpx.HTTPError:
+        log.info("Topic username lookup unavailable; trying CRM lead lookup")
+
+    for column in ("telegram_username", "username"):
+        try:
+            rows = await crm_get("crm_leads", {
+                "select": "id,full_name,telegram_chat_id,telegram_user_id",
+                column: f"ilike.{ref}",
+                "limit": "10",
+            })
+        except httpx.HTTPError:
+            continue
+        for row in rows:
+            candidates.append({
+                "chat_id": row.get("telegram_chat_id") or row.get("telegram_user_id"),
+                "user_id": row.get("telegram_user_id"),
+                "name": row.get("full_name") or f"@{ref}",
+                "lead_id": row.get("id"),
+            })
+
+    unique = {}
+    for candidate in candidates:
+        chat_id = str(candidate.get("chat_id") or "").strip()
+        if chat_id.isdigit():
+            existing = unique.get(chat_id, {})
+            unique[chat_id] = {**candidate, **{key: value for key, value in existing.items() if value and not candidate.get(key)}}
+    if not unique:
+        raise ValueError(f"Non trovo un cliente Telegram associato a @{ref} nel CRM.")
+    if len(unique) != 1:
+        raise ValueError(f"Ho trovato {len(unique)} clienti associati a @{ref}; indica il nome completo o il Topic.")
+    target = next(iter(unique.values()))
+    if target.get("lead_id"):
+        try:
+            conversations = await crm_get("crm_conversations", {
+                "select": "id",
+                "lead_id": f"eq.{target['lead_id']}",
+                "order": "last_message_at.desc.nullslast",
+                "limit": "1",
+            })
+            if conversations:
+                target["conversation_id"] = conversations[0].get("id")
+        except httpx.HTTPError:
+            pass
+    return target
+
+
+async def prepare_verified_customer_action(update: Update, change):
+    """Resolve a conversational manual-verification request before confirmation."""
+    payload = dict(change.get("payload") or {})
+    reference = payload.get("reference") or payload.get("username") or payload.get("customer")
+    target = await resolve_customer_reference(reference)
+    requested_body = str(payload.get("body") or "").strip()
+    include_guide = bool(payload.get("send_installation_guide"))
+    if not requested_body and not include_guide:
+        raise ValueError("Specifica il messaggio o chiedi esplicitamente la guida d'installazione.")
+    body_parts = [requested_body] if requested_body else []
+    if include_guide:
+        body_parts.append(INSTALLATION_GUIDE_MESSAGE)
+    prepared = {
+        "action": "verified_customer_action",
+        "payload": {
+            "telegram_chat_id": str(target["chat_id"]),
+            "conversation_id": target.get("conversation_id"),
+            "body": "\n\n".join(body_parts)[:8000],
+            "activate_ai": bool(payload.get("activate_ai")),
+            "recipient_label": str(target.get("name") or reference)[:160],
+        },
+    }
+    actions = ["guida d'installazione" if include_guide else "messaggio richiesto"]
+    if prepared["payload"]["activate_ai"]:
+        actions.append("IA riattivata")
+    return prepared, f"Cliente risolto: {prepared['payload']['recipient_label']}. Operazioni pronte: {', '.join(actions)}."
 
 
 async def broadcast_targets(segment):
@@ -544,7 +702,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log.warning("Admin bot access denied for Telegram user %s", getattr(update.effective_user, "id", "unknown"))
         await update.effective_message.reply_text("⛔ Questo bot e' riservato agli amministratori autorizzati.")
         return
-    await update.effective_message.reply_text("✅ Console amministratore XAU Machine attiva.\n\nDirezione: /briefing · /conversazioni · /analizza <id>\nCRM: /lead nome | lingua | campagna | nota · /stato id | stato · /etichette conversazione | tag1,tag2\nAutomazioni: /regola nome | stato_lead | minuti | messaggio | canale\nCanali e topic: /canale nome | url | lingua | codice | prodotto · /argomento utente:ID o thread:ID · /topic utente | chat | thread | nome\nAI/vendite: /prompt Nome | testo · invia un file .txt per importare un prompt · /invia chat | conversazione | testo · /nondepositati messaggio\nRipristino: /ripristina_telegram recupera tutto lo storico delle modifiche ai prompt confermate.\n\nLe modifiche e gli invii richiedono sempre /conferma.")
+    await update.effective_message.reply_text("✅ Console amministratore XAU Machine attiva.\n\nDirezione: /briefing · /conversazioni · /analizza <id>\nCRM: /lead nome | lingua | campagna | nota · /stato id | stato · /etichette conversazione | tag1,tag2\nAutomazioni: /regola nome | stato_lead | minuti | messaggio | canale\nCanali e topic: /canale nome | url | lingua | codice | prodotto · /argomento utente:ID o thread:ID · /topic utente | chat | thread | nome\nAI/vendite: /prompt Nome | testo · file .txt prompt · /invia chat | conversazione | testo · /verificato @username · /nondepositati messaggio\nRipristino: /ripristina_telegram recupera tutto lo storico delle modifiche ai prompt confermate.\n\nLe modifiche e gli invii richiedono sempre /conferma.")
 
 
 async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -669,6 +827,35 @@ async def prepare_sales_send(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await update.effective_message.reply_text("Messaggio sales preparato e non ancora inviato. Usa /conferma per inviarlo o /annulla.")
 
 
+async def prepare_verified_customer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Reliable shortcut for a manually verified customer's onboarding."""
+    if not authorized(update):
+        return
+    if not context.args:
+        await update.effective_message.reply_text(
+            "Uso: /verificato @username [| messaggio aggiuntivo]. Preparo guida d'installazione e riattivazione IA, poi chiedero' /conferma."
+        )
+        return
+    raw = " ".join(context.args)
+    reference, separator, note = raw.partition("|")
+    change = {"action": "verified_customer_action", "payload": {
+        "reference": reference.strip(),
+        "send_installation_guide": True,
+        "activate_ai": True,
+        "body": note.strip() if separator else "",
+    }}
+    try:
+        prepared, summary = await prepare_verified_customer_action(update, change)
+    except ValueError as exc:
+        await update.effective_message.reply_text(f"⚠️ {exc}")
+        return
+    except Exception:
+        log.exception("Verified customer command resolution failed")
+        await update.effective_message.reply_text("⚠️ Non riesco a risolvere il cliente nel CRM in questo momento.")
+        return
+    await stage_change(update, prepared, summary)
+
+
 async def prepare_non_deposit_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not authorized(update):
         return
@@ -772,6 +959,17 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text):
     if not reply:
         reply = "Sono qui. Posso aiutarti con CRM, conversazioni, lead, prompt, canali, follow-up e campagne. Dimmi cosa vuoi fare."
     change = result.get("change")
+    if isinstance(change, dict) and change.get("action") == "verified_customer_action":
+        try:
+            change, resolution = await prepare_verified_customer_action(update, change)
+            reply += "\n\n" + resolution
+        except ValueError as exc:
+            reply += "\n\nNon ho preparato alcuna modifica: " + str(exc)
+            change = None
+        except Exception:
+            log.exception("Customer verification resolution failed")
+            reply += "\n\n⚠️ Non riesco a verificare questo cliente nel CRM; non ho preparato alcun invio."
+            change = None
     if isinstance(change, dict) and change.get("action"):
         is_valid, missing = valid_change(change)
         if not is_valid:
@@ -1033,6 +1231,7 @@ def main():
     app.add_handler(CommandHandler("topic", prepare_topic))
     app.add_handler(CommandHandler("argomento", topic_info))
     app.add_handler(CommandHandler("invia", prepare_sales_send))
+    app.add_handler(CommandHandler("verificato", prepare_verified_customer))
     app.add_handler(CommandHandler("nondepositati", prepare_non_deposit_broadcast))
     app.add_handler(CommandHandler("lead", prepare_lead))
     app.add_handler(CommandHandler("canale", prepare_channel))
