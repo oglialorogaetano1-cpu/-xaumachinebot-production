@@ -741,6 +741,31 @@ async def google_translate_from_italian(text: str, target_language: str) -> tupl
         return text, False
 
 
+async def google_translate_to_italian(text: str, declared_language: str) -> tuple[str, bool]:
+    """Traduzione interna per lo staff, con rilevamento automatico della lingua."""
+    language = (declared_language or "").split("-", 1)[0].lower()
+    if not text or language in ("", "it") or not GOOGLE_TRANSLATE_API_KEY:
+        return "", False
+    try:
+        async with httpx.AsyncClient(timeout=12) as client:
+            response = await client.post(
+                "https://translation.googleapis.com/language/translate/v2",
+                params={"key": GOOGLE_TRANSLATE_API_KEY},
+                json={"q": text, "target": "it", "format": "text"},
+            )
+        if response.status_code >= 300:
+            log.warning("Traduzione italiana fallita %s: %s", response.status_code, response.text[:200])
+            return "", False
+        item = (((response.json().get("data") or {}).get("translations") or [{}])[0])
+        translated = str(item.get("translatedText") or "").strip()
+        if not translated or str(item.get("detectedSourceLanguage") or "").lower() == "it":
+            return "", False
+        return translated, True
+    except Exception as exc:
+        log.warning("Traduzione italiana non disponibile: %s", exc)
+        return "", False
+
+
 async def ensure_customer_topic(update: Update) -> int | None:
     """Crea un Topic per il cliente, riusando sempre quello gia' salvato."""
     forum_chat_id = support_forum_chat_id()
@@ -797,14 +822,24 @@ async def mirror_text_to_forum(update: Update, direction: str, body: str,
     thread_id = await ensure_customer_topic(update)
     if not thread_id:
         return
-    label = "👤 Cliente" if direction not in ("out", "outbound") else (
+    inbound = direction not in ("out", "outbound")
+    label = "👤 Cliente" if inbound else (
         "🧑‍💼 Operatore" if sender_type == "human" else "🤖 Assistente"
     )
+    topic_body = body[:3900]
+    # Nel Topic interno conserviamo l'originale e, per cliente e AI, anche
+    # l'italiano. La traduzione non viene mai inviata al cliente.
+    if inbound or sender_type == "ai":
+        source_body = body[:1800]
+        language = str(getattr(update.effective_user, "language_code", "") or "")
+        italian, translated = await google_translate_to_italian(source_body, language)
+        if translated:
+            topic_body = f"{source_body}\n\n🇮🇹 Traduzione italiana\n{italian[:1800]}"
     try:
         await update.get_bot().send_message(
             chat_id=int(forum_chat_id),
             message_thread_id=thread_id,
-            text=f"{label}\n{body[:3900]}",
+            text=f"{label}\n{topic_body}",
             disable_web_page_preview=True,
         )
     except Exception as exc:
