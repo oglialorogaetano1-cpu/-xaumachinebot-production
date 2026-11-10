@@ -959,7 +959,11 @@ async def mirror_text_to_forum(update: Update, direction: str, body: str,
         "🧑‍💼 Operatore" if sender_type == "human" else "🤖 Assistente"
     )
     topic_body = body[:3900]
-    if direction not in ("out", "outbound"):
+    # Il Topic deve mostrare anche la resa italiana delle risposte automatiche:
+    # prima venivano tradotti solo i messaggi in entrata del cliente, quindi
+    # lo staff vedeva la domanda in italiano ma non la risposta dell'AI.
+    # I messaggi scritti manualmente dagli operatori restano invece invariati.
+    if direction not in ("out", "outbound") or sender_type == "ai":
         italian, translated, detected_language = await google_translate_to_italian(topic_body)
         if detected_language and detected_language != "ai":
             await crm_store_language_code(update, detected_language)
