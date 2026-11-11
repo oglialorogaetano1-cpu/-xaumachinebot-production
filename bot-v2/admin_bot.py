@@ -32,6 +32,7 @@ log = logging.getLogger("xau-admin-bot")
 
 TOKEN = os.environ["ADMIN_BOT_TOKEN"]
 OPENAI_KEY = os.environ["ADMIN_OPENAI_API_KEY"]
+OPENAI_AUDIO_KEY = os.environ.get("OPENAI_AUDIO_API_KEY", OPENAI_KEY)
 SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 CRM_SECRET = os.environ["CRM_TRACKING_SECRET"]
@@ -459,7 +460,7 @@ async def stage_reconciled_prompt(update: Update, name, requested_change):
 
 
 async def transcribe(file_bytes, filename):
-    headers = {"Authorization": f"Bearer {OPENAI_KEY}"}
+    headers = {"Authorization": f"Bearer {OPENAI_AUDIO_KEY}"}
     files = {"file": (filename, file_bytes, "audio/ogg"), "model": (None, "gpt-4o-mini-transcribe")}
     async with httpx.AsyncClient(timeout=90) as client:
         response = await client.post("https://api.openai.com/v1/audio/transcriptions", headers=headers, files=files)

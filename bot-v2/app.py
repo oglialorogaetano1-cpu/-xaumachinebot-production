@@ -39,6 +39,7 @@ AI_TRADER_GUIDE_IT_URL = os.environ.get(
     "https://ai-trader-mt5-checkout.vercel.app/guides/AI_Trader_MT5_Guida_Installazione_IT.pdf",
 ).strip()
 GOOGLE_TRANSLATE_API_KEY = os.environ.get("GOOGLE_TRANSLATE_API_KEY", "").strip()
+OPENAI_AUDIO_API_KEY = os.environ.get("OPENAI_AUDIO_API_KEY", "").strip()
 SIGNAL_ROOM_URL = "https://t.me/+-e1_tDFps0Q2YmE0"
 SIGNAL_ROOM_SOURCE = "signal_room_24h"
 SIGNAL_ROOM_WELCOME_MESSAGE = (
@@ -1800,7 +1801,12 @@ async def human(update, context):
             await context.bot.send_message(chat_id=int(ADMIN_CHAT_ID), text=f"Nuova richiesta operatore dal chat {chat_id}")
         except Exception as e: log.warning("Admin notification failed: %s", e)
 
-async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def text_message(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    text_override: str | None = None,
+    allow_business_ai: bool = False,
+):
     msg = update.effective_message
     if msg is None or not update.effective_chat:
         return
@@ -1809,11 +1815,11 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user and update.effective_user.is_bot:
         log.info("Messaggio Telegram ignorato da account bot: @%s", update.effective_user.username or update.effective_user.id)
         return
-    testo = msg.text or ""
+    testo = (text_override if text_override is not None else msg.text) or ""
     # Le chat ricevute tramite Telegram Business sono gestite soltanto
     # dall'operatore nel relativo Topic privato: il bot fa da ponte, non
     # risponde al cliente e non attiva l'assistente AI.
-    if getattr(msg, "business_connection_id", None):
+    if getattr(msg, "business_connection_id", None) and not allow_business_ai:
         await record_message(update, "in", testo, "lead")
         log.info("Messaggio Business inoltrato al Topic senza risposta automatica: %s", update.effective_chat.id)
         return
@@ -1891,6 +1897,56 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
     await msg.reply_text(risposta, disable_web_page_preview=True)
     await record_message(update, "out", risposta, "ai")
+
+
+async def transcribe_voice(file_bytes: bytes, filename: str = "voice.ogg") -> str:
+    """Transcribe a Telegram voice message without storing the audio locally."""
+    if not OPENAI_AUDIO_API_KEY:
+        raise RuntimeError("Trascrizione vocale non configurata")
+    headers = {"Authorization": f"Bearer {OPENAI_AUDIO_API_KEY}"}
+    files = {
+        "file": (filename, file_bytes, "audio/ogg"),
+        "model": (None, "gpt-4o-mini-transcribe"),
+    }
+    async with httpx.AsyncClient(timeout=90) as client:
+        response = await client.post(
+            "https://api.openai.com/v1/audio/transcriptions",
+            headers=headers,
+            files=files,
+        )
+    response.raise_for_status()
+    return str((response.json() or {}).get("text") or "").strip()
+
+
+async def voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Turn a customer voice note into text, then handle it as a normal message."""
+    msg = update.effective_message
+    if not msg or not msg.voice or not update.effective_chat:
+        return
+    if update.effective_user and update.effective_user.is_bot:
+        return
+    try:
+        telegram_file = await msg.voice.get_file()
+        transcript = await transcribe_voice(
+            bytes(await telegram_file.download_as_bytearray()),
+            "voice.ogg",
+        )
+        if not transcript:
+            await msg.reply_text("Non riesco a capire il vocale. Puoi riprovare o scrivermi qui?")
+            return
+        # A voice received through a Telegram Business conversation is the
+        # customer's message for the linked CRM Topic.  Unlike a manual
+        # operator message, it may receive an AI reply when that customer AI
+        # is enabled; the normal AI status check still applies below.
+        await text_message(
+            update,
+            context,
+            text_override=transcript,
+            allow_business_ai=bool(getattr(msg, "business_connection_id", None)),
+        )
+    except Exception as exc:
+        log.warning("Trascrizione vocale non disponibile: %s", exc)
+        await msg.reply_text("Non riesco a trascrivere il vocale in questo momento. Puoi riprovare tra poco o scrivermi qui?")
 
 
 async def payment_screenshot_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2257,6 +2313,7 @@ def main():
     app.add_handler(CallbackQueryHandler(payment_review_callback, pattern=r"^pay:(?:approve|reject):"))
     app.add_handler(MessageHandler(filters.ChatType.SUPERGROUP, forum_operator_message), group=1)
     app.add_handler(MessageHandler(filters.PHOTO & filters.ChatType.PRIVATE, payment_screenshot_message))
+    app.add_handler(MessageHandler(filters.VOICE & filters.ChatType.PRIVATE, voice_message))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, text_message))
     log.info("XAU Machine Bot v2 online")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
