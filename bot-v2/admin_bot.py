@@ -189,6 +189,12 @@ UNSAFE_CAPITAL_ASSURANCE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 PROMPT_RELEASE_RE = re.compile(r"\s*[·•\-–—]?\s*v\.(\d+)\s*$", re.IGNORECASE)
+AI_STATUS_QUERY_RE = re.compile(
+    r"\b(?:ia|ai|intelligenza\s+artificiale)\b.{0,50}\b(?:attiv[ao]|acces[ao]|spen[st][ao]|paus[ao]|stato)\b|"
+    r"\b(?:è|e)\s+(?:attiv[ao]|acces[ao]|spen[st][ao]|in\s+pausa)\b",
+    re.IGNORECASE,
+)
+TELEGRAM_REFERENCE_RE = re.compile(r"@([A-Za-z0-9_]{2,})")
 
 
 def next_prompt_release(current_name, requested_name):
@@ -744,6 +750,49 @@ async def resolve_customer_reference(reference):
         except httpx.HTTPError:
             pass
     return target
+
+
+async def customer_ai_status(reference):
+    """Resolve a human reference, then read the exact current AI boolean."""
+    target = await resolve_customer_reference(reference)
+    async with httpx.AsyncClient(timeout=20) as client:
+        response = await client.post(
+            f"{SUPABASE_URL}/rest/v1/rpc/crm_get_ai_status",
+            headers=supabase_headers(),
+            json={
+                "p_secret": CRM_SECRET,
+                "p_tenant_slug": TENANT_SLUG,
+                "p_telegram_chat_id": int(target["chat_id"]),
+            },
+        )
+    response.raise_for_status()
+    return target, bool(response.json())
+
+
+def ai_status_reference(text):
+    """Recognise plain Italian questions such as 'IA attiva per @utente?'"""
+    if not AI_STATUS_QUERY_RE.search(str(text or "")):
+        return None
+    match = TELEGRAM_REFERENCE_RE.search(str(text or ""))
+    return match.group(1) if match else None
+
+
+async def reply_ai_status(update: Update, reference: str):
+    try:
+        target, active = await customer_ai_status(reference)
+    except ValueError as exc:
+        await update.effective_message.reply_text("⚠️ " + str(exc))
+        return
+    except Exception:
+        log.exception("AI status lookup failed")
+        await update.effective_message.reply_text("⚠️ Non riesco a leggere lo stato IA dal CRM in questo momento.")
+        return
+    name = str(target.get("name") or f"@{reference}").strip()
+    if active:
+        reply = f"✅ IA attiva per {name}. Può rispondere automaticamente ai nuovi messaggi del cliente."
+    else:
+        reply = f"⛔ IA non attiva per {name}: è spenta o in pausa. Posso riattivarla solo se me lo chiedi esplicitamente."
+    await update.effective_message.reply_text(reply)
 
 
 async def full_conversation_messages(conversation_id):
@@ -1380,6 +1429,16 @@ async def reply_prompt_status(update: Update, chat_id: int):
     await update.effective_message.reply_text(reply)
 
 
+async def ai_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not authorized(update):
+        return
+    reference = " ".join(context.args).strip()
+    if not reference:
+        await update.effective_message.reply_text("Uso: /ai_stato @username oppure /ai_stato nome cliente")
+        return
+    await reply_ai_status(update, reference)
+
+
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text):
     if not authorized(update):
         return
@@ -1387,6 +1446,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text):
     remember(chat_id, "user", text)
     if asks_prompt_status(text):
         await reply_prompt_status(update, chat_id)
+        return
+    reference = ai_status_reference(text)
+    if reference:
+        await reply_ai_status(update, reference)
         return
     direct_change = natural_verified_customer_request(text)
     if direct_change:
@@ -1743,6 +1806,7 @@ def main():
     app.add_handler(CommandHandler("canale", prepare_channel))
     app.add_handler(CommandHandler("regola", prepare_rule))
     app.add_handler(CommandHandler("stato", prepare_status))
+    app.add_handler(CommandHandler("ai_stato", ai_status_command))
     app.add_handler(CommandHandler("etichette", prepare_labels))
     app.add_handler(CommandHandler("conferma", confirm))
     app.add_handler(CommandHandler("annulla", cancel))
