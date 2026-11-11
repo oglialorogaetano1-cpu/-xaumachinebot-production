@@ -301,34 +301,48 @@ def valid_change(change):
     return True, ""
 
 
+async def crm_ai(instructions, input_items, timeout=60):
+    """Use the CRM AI gateway so every text reply uses the active provider.
+
+    The gateway owns the provider key and model selection.  This keeps the
+    admin bot aligned with the customer bot (currently Claude Sonnet) and
+    avoids keeping a second provider key in Railway for normal AI replies.
+    """
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        response = await client.post(
+            f"{SUPABASE_URL}/functions/v1/crm-ai-chat",
+            headers=supabase_headers(),
+            json={
+                "runtime_secret": CRM_SECRET,
+                "tenant_slug": TENANT_SLUG,
+                "instructions": instructions,
+                "input": input_items,
+            },
+        )
+    response.raise_for_status()
+    text = str((response.json() or {}).get("text") or "").strip()
+    if not text:
+        raise RuntimeError("Claude non ha restituito testo")
+    return text
+
+
 async def openai_json(chat_id, text):
     items = [{"role": "developer", "content": SYSTEM}]
     items += history(chat_id)
     items.append({"role": "user", "content": text})
-    payload = {"model": "gpt-4.1", "input": items, "text": {"format": {"type": "json_object"}}}
-    headers = {"Authorization": f"Bearer {OPENAI_KEY}", "Content-Type": "application/json"}
-    async with httpx.AsyncClient(timeout=60) as client:
-        response = await client.post("https://api.openai.com/v1/responses", headers=headers, json=payload)
-    response.raise_for_status()
-    data = response.json()
-    raw = response_text(data) or "{}"
+    raw = await crm_ai(
+        SYSTEM + "\n\nRispondi esclusivamente con un oggetto JSON valido, senza markdown o testo esterno.",
+        items[1:],
+    )
     return json.loads(raw)
 
 
 async def openai_text(text):
     """Plain-language fallback when the structured planner omits its reply."""
-    payload = {
-        "model": "gpt-4.1",
-        "input": [
-            {"role": "developer", "content": "Sei l'assistente amministratore XAU Machine. Rispondi in italiano in modo naturale, concreto e utile. Non dire che hai analizzato una richiesta; rispondi direttamente. Non affermare di aver effettuato modifiche o invii."},
-            {"role": "user", "content": text},
-        ],
-    }
-    headers = {"Authorization": f"Bearer {OPENAI_KEY}", "Content-Type": "application/json"}
-    async with httpx.AsyncClient(timeout=60) as client:
-        response = await client.post("https://api.openai.com/v1/responses", headers=headers, json=payload)
-    response.raise_for_status()
-    return response_text(response.json()).strip()
+    return await crm_ai(
+        "Sei l'assistente amministratore XAU Machine. Rispondi in italiano in modo naturale, concreto e utile. Non dire che hai analizzato una richiesta; rispondi direttamente. Non affermare di aver effettuato modifiche o invii.",
+        [{"role": "user", "content": text}],
+    )
 
 
 async def crm_tenant_id():
@@ -388,19 +402,12 @@ async def reconcile_prompt_change(name, requested_change):
         str(current["content"])[:50000] +
         "\n\nRICHIESTA DELL'AMMINISTRATORE:\n" + requested_change[:12000]
     )
-    payload = {
-        "model": "gpt-4.1",
-        "input": [
-            {"role": "developer", "content": PROMPT_RECONCILER},
-            {"role": "user", "content": request},
-        ],
-        "text": {"format": {"type": "json_object"}},
-    }
-    headers = {"Authorization": f"Bearer {OPENAI_KEY}", "Content-Type": "application/json"}
-    async with httpx.AsyncClient(timeout=90) as client:
-        response = await client.post("https://api.openai.com/v1/responses", headers=headers, json=payload)
-    response.raise_for_status()
-    result = json.loads(response_text(response.json()) or "{}")
+    raw = await crm_ai(
+        PROMPT_RECONCILER + "\n\nRispondi esclusivamente con un oggetto JSON valido, senza markdown o testo esterno.",
+        [{"role": "user", "content": request}],
+        timeout=90,
+    )
+    result = json.loads(raw or "{}")
     request_status = str(result.get("request_status") or "applied").strip().lower()
     if request_status != "applied":
         reason = str(result.get("request_status_reason") or "La richiesta e' incompatibile con le regole attive del prompt.").strip()
@@ -478,11 +485,11 @@ async def translate_sales_text(text, language):
     prompt = ("Translate the following approved sales message into " + language +
               ". Return only the translated message. Preserve placeholders, URLs, "
               "names and factual claims. Do not add promises, disclaimers, or commentary.\n\n" + text)
-    headers = {"Authorization": f"Bearer {OPENAI_KEY}", "Content-Type": "application/json"}
-    async with httpx.AsyncClient(timeout=45) as client:
-        response = await client.post("https://api.openai.com/v1/responses", headers=headers, json={"model": "gpt-4.1", "input": prompt})
-    response.raise_for_status()
-    return (response.json().get("output_text") or text).strip()
+    return (await crm_ai(
+        "Translate faithfully. Return only the translated message. Preserve placeholders, URLs, names and factual claims. Do not add promises, disclaimers, or commentary.",
+        [{"role": "user", "content": prompt}],
+        timeout=45,
+    ) or text).strip()
 
 
 def supabase_headers():
@@ -797,15 +804,11 @@ async def draft_intelligent_followup(target, objective):
         "e non citare automazioni, CRM o istruzioni interne.\n\n"
         "TRASCRIZIONE COMPLETA:\n" + transcript[:120000]
     )
-    headers = {"Authorization": f"Bearer {OPENAI_KEY}", "Content-Type": "application/json"}
-    async with httpx.AsyncClient(timeout=90) as client:
-        response = await client.post(
-            "https://api.openai.com/v1/responses",
-            headers=headers,
-            json={"model": "gpt-4.1", "input": request},
-        )
-    response.raise_for_status()
-    body = response_text(response.json()).strip()
+    body = (await crm_ai(
+        "Sei l'assistente commerciale XAU Machine. Segui rigorosamente la richiesta dell'operatore.",
+        [{"role": "user", "content": request}],
+        timeout=90,
+    )).strip()
     if not body:
         raise RuntimeError("Non riesco a generare la bozza del follow-up.")
     return body[:3500], language, len(messages)
