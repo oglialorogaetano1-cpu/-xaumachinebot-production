@@ -1028,16 +1028,18 @@ async def forum_operator_message(update: Update, context: ContextTypes.DEFAULT_T
         await msg.reply_text("⚠️ Questo Topic non e' ancora collegato a un cliente.")
         return
     command = ((msg.text or "").strip().split(maxsplit=1) or [""])[0].split("@", 1)[0].lower()
-    if command in ("/stop", "/accendi"):
+    if command in ("/stop", "/accendi", "/toggle_auto_reply"):
+        # /toggle_auto_reply is deliberately an explicit re-enable command:
+        # it never switches an active customer off by mistake.
         mode = "stop" if command == "/stop" else "on"
         result = await crm_set_ai_control(int(mapping["telegram_chat_id"]), mode)
         if not result.get("ok"):
             await msg.reply_text("⚠️ Non sono riuscito a modificare lo stato dell'IA. Riprova tra poco.")
             return
         if mode == "stop":
-            await msg.reply_text("⛔ IA spenta per questo cliente. Rimarra' ferma finche' non scrivi /accendi.")
+            await msg.reply_text("⛔ IA sospesa per questo cliente. Per riattivarla usa /toggle_auto_reply in questo Topic.")
         else:
-            await msg.reply_text("✅ IA riattivata subito per questo cliente.")
+            await msg.reply_text("✅ IA riattivata per questo cliente. Rispondera' ai suoi nuovi messaggi.")
         return
     if (msg.text or "").startswith("/"):
         return
@@ -1094,7 +1096,7 @@ async def forum_operator_message(update: Update, context: ContextTypes.DEFAULT_T
         await crm_record_forum_reply(mapping, body)
         # Una risposta manuale mette l'IA in pausa per quel cliente, ma non deve
         # generare rumore nel Topic: l'operatore conosce gia' la propria azione.
-        # Restano invece espliciti i soli comandi /stop e /accendi qui sopra.
+        # Restano invece espliciti i soli comandi /stop e /toggle_auto_reply qui sopra.
         await crm_set_ai_control(int(mapping["telegram_chat_id"]), "stop")
     except Exception as exc:
         log.warning("Risposta Topic -> cliente fallita: %s", exc)
@@ -1816,13 +1818,10 @@ async def text_message(
         log.info("Messaggio Telegram ignorato da account bot: @%s", update.effective_user.username or update.effective_user.id)
         return
     testo = (text_override if text_override is not None else msg.text) or ""
-    # Le chat ricevute tramite Telegram Business sono gestite soltanto
-    # dall'operatore nel relativo Topic privato: il bot fa da ponte, non
-    # risponde al cliente e non attiva l'assistente AI.
-    if getattr(msg, "business_connection_id", None) and not allow_business_ai:
-        await record_message(update, "in", testo, "lead")
-        log.info("Messaggio Business inoltrato al Topic senza risposta automatica: %s", update.effective_chat.id)
-        return
+    # Anche i messaggi ricevuti via Telegram Business possono ricevere una
+    # risposta AI: lo stato nel CRM decide se l'AI e' attiva. Una risposta
+    # manuale dell'operatore nel Topic la mette in pausa fino al comando
+    # /toggle_auto_reply, quindi non puo' sovrapporsi all'operatore.
     testo_lower = testo.lower()
     categorie_richieste = (
         any(x in testo_lower for x in ("come funziona il bot", "bot automatico", "copy trading")),
@@ -1895,7 +1894,16 @@ async def text_message(
                 update, context, periodo_ai, testo, registra_messaggio=False,
             )
             return
-    await msg.reply_text(risposta, disable_web_page_preview=True)
+    business_connection_id = getattr(msg, "business_connection_id", None)
+    if business_connection_id:
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=risposta,
+            disable_web_page_preview=True,
+            business_connection_id=business_connection_id,
+        )
+    else:
+        await msg.reply_text(risposta, disable_web_page_preview=True)
     await record_message(update, "out", risposta, "ai")
 
 
