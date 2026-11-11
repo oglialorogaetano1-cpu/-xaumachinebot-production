@@ -308,6 +308,28 @@ def valid_change(change):
     return True, ""
 
 
+async def openai_ai_fallback(instructions, input_items, timeout=60):
+    """Keep the private admin console available if the CRM AI gateway fails.
+
+    The normal path remains the gateway (Claude/Sonnet).  This is only a
+    resilience path for the administrator: a provider outage must not make
+    prompt changes or CRM operations impossible.
+    """
+    payload = {
+        "model": "gpt-4.1",
+        "input": [{"role": "developer", "content": instructions}, *input_items],
+    }
+    headers = {"Authorization": f"Bearer {OPENAI_KEY}", "Content-Type": "application/json"}
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        response = await client.post("https://api.openai.com/v1/responses", headers=headers, json=payload)
+    response.raise_for_status()
+    data = response.json() or {}
+    text = str(data.get("output_text") or "").strip()
+    if not text:
+        raise RuntimeError("Fallback OpenAI non ha restituito testo")
+    return text
+
+
 async def crm_ai(instructions, input_items, timeout=60):
     """Use the CRM AI gateway so every text reply uses the active provider.
 
@@ -315,22 +337,26 @@ async def crm_ai(instructions, input_items, timeout=60):
     admin bot aligned with the customer bot (currently Claude Sonnet) and
     avoids keeping a second provider key in Railway for normal AI replies.
     """
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        response = await client.post(
-            f"{SUPABASE_URL}/functions/v1/crm-ai-chat",
-            headers=supabase_headers(),
-            json={
-                "runtime_secret": CRM_SECRET,
-                "tenant_slug": TENANT_SLUG,
-                "instructions": instructions,
-                "input": input_items,
-            },
-        )
-    response.raise_for_status()
-    text = str((response.json() or {}).get("text") or "").strip()
-    if not text:
-        raise RuntimeError("Claude non ha restituito testo")
-    return text
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(
+                f"{SUPABASE_URL}/functions/v1/crm-ai-chat",
+                headers=supabase_headers(),
+                json={
+                    "runtime_secret": CRM_SECRET,
+                    "tenant_slug": TENANT_SLUG,
+                    "instructions": instructions,
+                    "input": input_items,
+                },
+            )
+        response.raise_for_status()
+        text = str((response.json() or {}).get("text") or "").strip()
+        if not text:
+            raise RuntimeError("Claude non ha restituito testo")
+        return text
+    except Exception as gateway_error:
+        log.warning("Gateway AI CRM non disponibile (%s); uso fallback OpenAI", gateway_error)
+        return await openai_ai_fallback(instructions, input_items, timeout)
 
 
 async def openai_json(chat_id, text):
