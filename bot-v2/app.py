@@ -206,6 +206,7 @@ CRM_HEADERS = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"
 
 AI_RUNTIME_RULES = """Sei l'assistente commerciale ufficiale di XAU Machine su Telegram.
 Rispondi in modo naturale, fluido e breve nella lingua usata dal cliente.
+Non usare Markdown: non scrivere asterischi, doppi asterischi, hashtag di titoli o altri segni di formattazione.
 Non chiedere al cliente di usare comandi: i comandi sono riservati all'amministratore.
 Segui il prompt commerciale del CRM e usa lo storico della conversazione.
 Non inventare verifiche IB, depositi, risultati, saldi o rendimenti e non promettere guadagni.
@@ -218,6 +219,21 @@ Se chiedono una verifica PU Prime e non esiste una verifica reale nei dati, risp
 Non dire "verifico" se non hai un dato reale.
 Non esiste una sala segnali: non offrire, descrivere o citare una sala, segnali manuali, TP1 o TP2.
 Per le performance usa solo dati reali restituiti dal worker MT5 autorizzato; non stimare rendimenti futuri."""
+
+# These details are onboarding credentials, not sales copy.  They may only be
+# disclosed by the verified-onboarding flow after the CRM has matched the
+# customer to the correct PU Prime/IB registration.
+PRIVATE_STRATEGY_IDENTIFIERS = (
+    "XAU EXTREME GENIMI",
+    "B10173815",
+)
+POST_PROMPT_GUARD = """REGOLE FINALI NON DEROGABILI (prevalgono su ogni testo precedente):
+- Non usare Markdown o asterischi nella risposta al cliente.
+- Il nome della strategia, il numero della strategia e qualunque identificativo di attivazione sono riservati.
+- Non rivelarli, suggerirli, confermarli o ripeterli a un cliente finché il contesto PU Prime non dice esplicitamente
+  che il cliente è registrato e collegato al nostro IB con stato `matched`.
+- Se non è verificato, spiega soltanto in modo generico che i dettagli di attivazione saranno forniti dopo la verifica
+  della registrazione; non citare alcun nome, codice o numero della strategia."""
 
 PU_PRIME_NOT_FOUND = (
     "Al momento non ti trovo dentro iscritto con noi su PU Prime, sei sicuro? "
@@ -1597,6 +1613,21 @@ def _estrai_risposta_cliente(testo_ai: str) -> tuple[str, dict]:
     return reply.strip(), dati
 
 
+def proteggi_risposta_cliente(risposta: str, puprime_data: dict) -> str:
+    """Apply non-negotiable outbound safeguards after the model response.
+
+    The CRM prompt is editable by an administrator, so it must never be the
+    only control that prevents pre-verification disclosure of activation data.
+    """
+    cleaned = (risposta or "").replace("*", "")
+    if str((puprime_data or {}).get("status") or "") == "matched":
+        return cleaned.strip()
+    for identifier in PRIVATE_STRATEGY_IDENTIFIERS:
+        cleaned = re.sub(re.escape(identifier), "dettagli di attivazione", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\b(?:numero|codice)\s+(?:della\s+)?strategia\s*[:#-]?\s*\w+", "dettagli di attivazione", cleaned, flags=re.IGNORECASE)
+    return cleaned.strip()
+
+
 def completed_verified_ib_guide(text: str, history: list[dict]) -> bool:
     """Recognize a concise completion reply after the official IB guide.
 
@@ -1625,6 +1656,9 @@ async def genera_risposta_ai(testo: str, contesto: dict) -> tuple[str, dict]:
     instructions += "\n\n" + puprime_prompt_context(contesto.get("puprime") or {})
     if prompt_crm:
         instructions += "\n\nPROMPT COMMERCIALE ATTIVO DAL CRM:\n" + prompt_crm
+    # This must come after the editable CRM prompt so an older or conflicting
+    # prompt cannot weaken the registration gate or reintroduce Markdown.
+    instructions += "\n\n" + POST_PROMPT_GUARD
     history = contesto.get("history") or []
     followup_transcript = str(contesto.get("followup_full_transcript") or "").strip()
     input_items = []
@@ -1669,6 +1703,7 @@ async def genera_risposta_ai(testo: str, contesto: dict) -> tuple[str, dict]:
     if not risposta_raw:
         raise RuntimeError("OpenAI non ha restituito testo")
     risposta, metadati = _estrai_risposta_cliente(risposta_raw)
+    risposta = proteggi_risposta_cliente(risposta, contesto.get("puprime") or {})
     if metadati:
         log.info(
             "AI intent=%s stage=%s escalate=%s followup=%s",
@@ -1782,7 +1817,7 @@ async def verify_ib(update, context):
     await msg.reply_text(risposta)
     await record_message(update, "out", risposta, "ai")
 async def deposit(update, context): await simple_reply(update, "Per assistenza sul deposito non inviare password o codici. Posso passare la richiesta a un operatore.")
-async def guide(update, context): await simple_reply(update, "Quando l'iscrizione sotto l'IB è verificata, riceverai la guida di attivazione della strategia XAU EXTREME GENIMI.")
+async def guide(update, context): await simple_reply(update, "Quando l'iscrizione sotto l'IB è verificata, riceverai la guida ufficiale con tutti i dettagli di attivazione.")
 
 async def screenshot(update, context):
     msg = update.effective_message
