@@ -1197,21 +1197,33 @@ async def send_topic_text_to_customer(bot, mapping: dict, body: str) -> None:
     token rotation or polling restart even when the connection is valid.  A
     single delayed retry avoids making the operator rewrite their message.
     """
+    business_connection_id = mapping.get("business_connection_id")
     for attempt in range(2):
         try:
             await bot.send_message(
                 chat_id=int(mapping["telegram_chat_id"]),
                 text=body,
                 disable_web_page_preview=True,
-                business_connection_id=mapping.get("business_connection_id"),
+                business_connection_id=business_connection_id,
             )
             return
         except Exception as exc:
             transient_peer = "peer_id_invalid" in str(exc).lower()
-            if attempt == 0 and transient_peer and mapping.get("business_connection_id"):
+            if attempt == 0 and transient_peer and business_connection_id:
                 log.warning("Peer Business non pronto; ritento l'invio Topic una volta")
                 await asyncio.sleep(2)
                 continue
+            # Some legacy Topics were linked before the Business connection was
+            # saved for that exact customer.  If that connection rejects the
+            # peer after its retry, use the normal bot chat as a last resort.
+            if transient_peer and business_connection_id:
+                log.warning("Peer Business non disponibile; provo il canale Telegram diretto")
+                await bot.send_message(
+                    chat_id=int(mapping["telegram_chat_id"]),
+                    text=body,
+                    disable_web_page_preview=True,
+                )
+                return
             raise
 
 
