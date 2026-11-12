@@ -1003,6 +1003,26 @@ async def ensure_customer_topic(update: Update) -> int | None:
         return None
 
 
+def appears_to_be_italian(text: str) -> bool:
+    """Conservative local guard for the Topic translation label.
+
+    The AI fallback has no language-detection field.  It may return an Italian
+    message with tiny punctuation changes, which must never be displayed as a
+    second, misleading "Italian translation".
+    """
+    words = set(re.findall(r"[a-zàèéìòóù']+", text.casefold()))
+    italian_markers = {
+        "puoi", "spiegare", "funziona", "come", "quale", "quanto", "perché",
+        "perche", "voglio", "vorrei", "conto", "cliente", "grazie", "bene",
+        "sono", "questa", "questo", "della", "degli", "anche", "allora",
+    }
+    return len(words & italian_markers) >= 2
+
+
+def normalized_for_translation_check(text: str) -> str:
+    return re.sub(r"[^\\w]+", "", text.casefold(), flags=re.UNICODE)
+
+
 async def mirror_text_to_forum(update: Update, direction: str, body: str,
                                sender_type: str | None = None) -> None:
     """Specchia nel Topic soltanto le chat dell'account Telegram Business."""
@@ -1034,7 +1054,9 @@ async def mirror_text_to_forum(update: Update, direction: str, body: str,
         is_italian_source = detected_language == "it" or str(
             getattr(update.effective_user, "language_code", "") or ""
         ).lower().startswith("it")
-        if translated and not is_italian_source and italian.casefold() != topic_body.casefold():
+        same_text = normalized_for_translation_check(italian) == normalized_for_translation_check(topic_body)
+        if (translated and not is_italian_source and not appears_to_be_italian(topic_body)
+                and not same_text):
             topic_body = f"{topic_body}\n\n🇮🇹 Traduzione italiana: {italian}"
         log.info(
             "Traduzione Topic cliente: eseguita=%s lingua_rilevata=%s",
