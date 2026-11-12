@@ -911,6 +911,62 @@ async def ai_detect_language(text: str) -> str:
         return ""
 
 
+def obvious_message_language(text: str) -> str:
+    """Fast conservative fallback for common customer languages."""
+    words = set(re.findall(r"[a-zàèéìòóùç']+", text.casefold()))
+    markers = {
+        "en": {"the", "and", "you", "your", "how", "what", "with", "can", "please", "hello", "thanks"},
+        "fr": {"bonjour", "merci", "vous", "avec", "pour", "comment", "quel", "est", "une", "des"},
+        "es": {"hola", "gracias", "para", "como", "quiero", "puedo", "con", "una", "que"},
+        "de": {"hallo", "danke", "und", "ich", "mit", "wie", "für", "kann", "bitte"},
+        "pt": {"olá", "obrigado", "você", "para", "como", "quero", "com", "uma"},
+        "it": {"ciao", "grazie", "puoi", "come", "voglio", "con", "questa", "conto", "perché"},
+    }
+    candidates = [(len(words & values), code) for code, values in markers.items()]
+    score, language = max(candidates, default=(0, ""))
+    return language if score >= 2 else ""
+
+
+async def latest_customer_language(mapping: dict) -> str:
+    """Prefer the language in the customer's most recent inbound CRM message."""
+    chat_id = str(mapping.get("telegram_chat_id") or "").strip()
+    saved = str(mapping.get("language") or "").split("-", 1)[0].lower()
+    if not chat_id:
+        return saved or "it"
+    headers = dict(CRM_HEADERS)
+    headers.pop("Prefer", None)
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            leads = await client.get(
+                f"{SUPABASE_URL}/rest/v1/crm_leads", headers=headers,
+                params={"select": "id", "telegram_chat_id": f"eq.{chat_id}", "limit": "1"},
+            )
+            leads.raise_for_status()
+            lead_rows = leads.json() or []
+            if not lead_rows:
+                return saved or "it"
+            conversations = await client.get(
+                f"{SUPABASE_URL}/rest/v1/crm_conversations", headers=headers,
+                params={"select": "id", "lead_id": f"eq.{lead_rows[0]['id']}", "order": "last_message_at.desc.nullslast", "limit": "1"},
+            )
+            conversations.raise_for_status()
+            conversation_rows = conversations.json() or []
+            if not conversation_rows:
+                return saved or "it"
+            messages = await client.get(
+                f"{SUPABASE_URL}/rest/v1/crm_messages", headers=headers,
+                params={"select": "body", "conversation_id": f"eq.{conversation_rows[0]['id']}", "direction": "eq.in", "order": "created_at.desc", "limit": "1"},
+            )
+            messages.raise_for_status()
+        message_rows = messages.json() or []
+        body = str(message_rows[0].get("body") or "") if message_rows else ""
+        language = obvious_message_language(body) or await ai_detect_language(body)
+        return language or saved or "it"
+    except Exception as exc:
+        log.warning("Lettura ultima lingua cliente fallita: %s", exc)
+        return saved or "it"
+
+
 async def ai_translate_to_italian(text: str) -> tuple[str, bool, str]:
     """Fallback privato: usa la Edge Function CRM quando Google non e' configurato.
 
@@ -1193,7 +1249,7 @@ async def forum_operator_message(update: Update, context: ContextTypes.DEFAULT_T
         return
     try:
         if msg.text:
-            language = str(mapping.get("language") or "it").split("-", 1)[0].lower()
+            language = await latest_customer_language(mapping)
             body, translated = await google_translate_from_italian(
                 msg.text, language,
             )
