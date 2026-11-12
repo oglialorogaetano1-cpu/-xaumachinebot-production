@@ -872,12 +872,43 @@ async def google_translate_to_italian(text: str) -> tuple[str, bool, str]:
             log.warning("Google Translate verso italiano fallito %s: %s", r.status_code, r.text[:200])
         except Exception as exc:
             log.warning("Google Translate verso italiano non disponibile: %s", exc)
-    # La traduzione del Topic deve essere deterministica.  Un modello
-    # conversazionale può interpretare una domanda e rispondere invece di
-    # tradurla, creando un falso messaggio interno.  Se Google non è
-    # disponibile, conserva solo l'originale: non inventare mai una
-    # "traduzione italiana".
-    return text, False, ""
+    # Non usare il modello per produrre una traduzione interna: può rispondere
+    # alla domanda anziché tradurla. Lo usiamo soltanto per ricavare un codice
+    # lingua strettamente validato, così le successive risposte manuali dello
+    # staff raggiungono il cliente nella lingua corretta.
+    return text, False, await ai_detect_language(text)
+
+
+async def ai_detect_language(text: str) -> str:
+    """Return only an ISO language code; never expose AI-generated text."""
+    if not CRM_TRACKING_SECRET or not text.strip():
+        return ""
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.post(
+                f"{SUPABASE_URL}/functions/v1/crm-ai-chat",
+                headers={
+                    "apikey": SUPABASE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "runtime_secret": CRM_TRACKING_SECRET,
+                    "tenant_slug": CRM_TENANT_SLUG,
+                    "instructions": (
+                        "Rileva la lingua del testo. Rispondi solo con il codice ISO 639-1 "
+                        "minuscolo di due lettere, senza spiegazioni, traduzioni o altro testo."
+                    ),
+                    "input": [{"role": "user", "content": text[:2000]}],
+                },
+            )
+        if r.status_code >= 300:
+            return ""
+        language = str((r.json() or {}).get("text") or "").strip().lower()
+        return language if re.fullmatch(r"[a-z]{2}", language) else ""
+    except Exception as exc:
+        log.warning("Rilevamento lingua AI non disponibile: %s", exc)
+        return ""
 
 
 async def ai_translate_to_italian(text: str) -> tuple[str, bool, str]:
@@ -1162,17 +1193,21 @@ async def forum_operator_message(update: Update, context: ContextTypes.DEFAULT_T
         return
     try:
         if msg.text:
+            language = str(mapping.get("language") or "it").split("-", 1)[0].lower()
             body, translated = await google_translate_from_italian(
-                msg.text, str(mapping.get("language") or "it"),
+                msg.text, language,
             )
+            if language != "it" and not translated:
+                await msg.reply_text(
+                    "⚠️ Traduzione non disponibile: messaggio non inviato, così il cliente non riceve testo nella lingua sbagliata."
+                )
+                return
             await context.bot.send_message(
                 chat_id=int(mapping["telegram_chat_id"]),
                 text=body,
                 disable_web_page_preview=True,
                 business_connection_id=mapping.get("business_connection_id"),
             )
-            if str(mapping.get("language") or "it") != "it" and not translated:
-                await msg.reply_text("⚠️ Traduzione non disponibile: il messaggio e' stato inviato in italiano.")
         else:
             business_connection_id = mapping.get("business_connection_id")
             if business_connection_id and msg.photo:
