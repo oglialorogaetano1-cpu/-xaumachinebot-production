@@ -1190,6 +1190,31 @@ async def crm_record_forum_reply(mapping: dict, body: str) -> None:
         log.warning("Registrazione risposta Topic non disponibile: %s", exc)
 
 
+async def send_topic_text_to_customer(bot, mapping: dict, body: str) -> None:
+    """Deliver an operator reply, tolerating a just-restored Business peer.
+
+    Telegram Business can briefly return Peer_id_invalid immediately after a
+    token rotation or polling restart even when the connection is valid.  A
+    single delayed retry avoids making the operator rewrite their message.
+    """
+    for attempt in range(2):
+        try:
+            await bot.send_message(
+                chat_id=int(mapping["telegram_chat_id"]),
+                text=body,
+                disable_web_page_preview=True,
+                business_connection_id=mapping.get("business_connection_id"),
+            )
+            return
+        except Exception as exc:
+            transient_peer = "peer_id_invalid" in str(exc).lower()
+            if attempt == 0 and transient_peer and mapping.get("business_connection_id"):
+                log.warning("Peer Business non pronto; ritento l'invio Topic una volta")
+                await asyncio.sleep(2)
+                continue
+            raise
+
+
 async def forum_operator_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Inoltra al cliente le risposte scritte dagli operatori nel suo Topic."""
     msg = update.effective_message
@@ -1231,12 +1256,7 @@ async def forum_operator_message(update: Update, context: ContextTypes.DEFAULT_T
                     "⚠️ Traduzione non disponibile: messaggio non inviato, così il cliente non riceve testo nella lingua sbagliata."
                 )
                 return
-            await context.bot.send_message(
-                chat_id=int(mapping["telegram_chat_id"]),
-                text=body,
-                disable_web_page_preview=True,
-                business_connection_id=mapping.get("business_connection_id"),
-            )
+            await send_topic_text_to_customer(context.bot, mapping, body)
         else:
             business_connection_id = mapping.get("business_connection_id")
             if business_connection_id and msg.photo:
