@@ -2076,6 +2076,16 @@ async def text_message(
     contesto["puprime"] = await crm_puprime_context(update, testo)
     if not await crm_ai_attiva(update.effective_chat.id):
         return
+    # Le conversazioni già gestite a mano restano sospese dal controllo IA
+    # per cliente. Quando l'AI è effettivamente autorizzata a rispondere,
+    # ricostruisce invece tutto lo storico CRM (non solo gli ultimi messaggi),
+    # così comprende a quale punto è arrivata la conversazione.
+    conversation_id = str(contesto.get("conversation_id") or "").strip()
+    if conversation_id:
+        try:
+            contesto["followup_full_transcript"] = await full_followup_transcript(conversation_id)
+        except Exception as exc:
+            log.warning("Lettura storico completo conversazione fallita: %s", exc)
     try:
         risposta, metadati = await genera_risposta_ai(testo, contesto)
     except Exception as exc:
