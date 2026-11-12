@@ -930,20 +930,33 @@ def obvious_message_language(text: str) -> str:
 async def latest_customer_language(mapping: dict) -> str:
     """Prefer the language in the customer's most recent inbound CRM message."""
     chat_id = str(mapping.get("telegram_chat_id") or "").strip()
+    user_id = str(mapping.get("telegram_user_id") or "").strip()
     saved = str(mapping.get("language") or "").split("-", 1)[0].lower()
-    if not chat_id:
+    identifiers = [value for value in dict.fromkeys((chat_id, user_id)) if value]
+    if not identifiers:
         return saved or "it"
     headers = dict(CRM_HEADERS)
     headers.pop("Prefer", None)
     try:
         async with httpx.AsyncClient(timeout=15) as client:
-            leads = await client.get(
-                f"{SUPABASE_URL}/rest/v1/crm_leads", headers=headers,
-                params={"select": "id", "telegram_chat_id": f"eq.{chat_id}", "limit": "1"},
-            )
-            leads.raise_for_status()
-            lead_rows = leads.json() or []
+            lead_rows = []
+            # Depending on when the Topic was created, the CRM may have kept
+            # either the customer chat id or the Telegram user id.  Looking at
+            # both is essential: a miss here silently selected Italian before.
+            for identifier in identifiers:
+                for column in ("telegram_chat_id", "telegram_user_id"):
+                    leads = await client.get(
+                        f"{SUPABASE_URL}/rest/v1/crm_leads", headers=headers,
+                        params={"select": "id", column: f"eq.{identifier}", "limit": "1"},
+                    )
+                    leads.raise_for_status()
+                    lead_rows = leads.json() or []
+                    if lead_rows:
+                        break
+                if lead_rows:
+                    break
             if not lead_rows:
+                log.warning("Lingua cliente non trovata nel CRM: chat=%s user=%s", chat_id or "-", user_id or "-")
                 return saved or "it"
             conversations = await client.get(
                 f"{SUPABASE_URL}/rest/v1/crm_conversations", headers=headers,
@@ -955,12 +968,16 @@ async def latest_customer_language(mapping: dict) -> str:
                 return saved or "it"
             messages = await client.get(
                 f"{SUPABASE_URL}/rest/v1/crm_messages", headers=headers,
-                params={"select": "body", "conversation_id": f"eq.{conversation_rows[0]['id']}", "direction": "eq.in", "order": "created_at.desc", "limit": "1"},
+                # sender_type is stable in the CRM, unlike historical values
+                # of direction (in/inbound). This always selects the customer's
+                # most recent message before an operator reply is translated.
+                params={"select": "body", "conversation_id": f"eq.{conversation_rows[0]['id']}", "sender_type": "eq.lead", "order": "created_at.desc", "limit": "1"},
             )
             messages.raise_for_status()
         message_rows = messages.json() or []
         body = str(message_rows[0].get("body") or "") if message_rows else ""
         language = obvious_message_language(body) or await ai_detect_language(body)
+        log.info("Lingua Topic risolta: %s (messaggio CRM=%s, fallback=%s)", language or saved or "it", bool(body), saved or "-")
         return language or saved or "it"
     except Exception as exc:
         log.warning("Lettura ultima lingua cliente fallita: %s", exc)
