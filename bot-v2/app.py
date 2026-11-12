@@ -42,6 +42,9 @@ AI_TRADER_GUIDE_IT_URL = os.environ.get(
     "https://ai-trader-mt5-checkout.vercel.app/guides/AI_Trader_MT5_Guida_Installazione_IT.pdf",
 ).strip()
 GOOGLE_TRANSLATE_API_KEY = os.environ.get("GOOGLE_TRANSLATE_API_KEY", "").strip()
+# L'AI parte volutamente spenta a ogni avvio: l'amministratore la abilita
+# esplicitamente dal proprio Telegram con /ai_accendi e la blocca con /ai_spegni.
+AI_AUTOREPLY_ENABLED = False
 SIGNAL_ROOM_URL = "https://t.me/+-e1_tDFps0Q2YmE0"
 SIGNAL_ROOM_SOURCE = "signal_room_24h"
 SIGNAL_ROOM_WELCOME_MESSAGE = (
@@ -134,6 +137,23 @@ def support_forum_chat_id() -> str:
 def is_admin_chat(chat_id: int | None) -> bool:
     """Reports and internal funnel data are private admin-only data."""
     return bool(chat_id is not None and ADMIN_CHAT_ID and str(chat_id) == str(ADMIN_CHAT_ID).strip())
+
+
+async def ai_global_control(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Consente soltanto all'amministratore di attivare o fermare tutte le risposte AI."""
+    global AI_AUTOREPLY_ENABLED
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not msg or not chat:
+        return
+    if not is_admin_chat(chat.id):
+        await msg.reply_text("Questo comando e' riservato all'amministratore.")
+        return
+    command = ((msg.text or "").split(maxsplit=1) or [""])[0].split("@", 1)[0].lower()
+    AI_AUTOREPLY_ENABLED = command == "/ai_accendi"
+    stato = "attivata" if AI_AUTOREPLY_ENABLED else "fermata"
+    await msg.reply_text(f"✅ AI {stato} per tutti i clienti.")
+    log.info("AI globale %s dall'amministratore", "attivata" if AI_AUTOREPLY_ENABLED else "fermata")
 
 
 ORDER_ID_RE = re.compile(r"\baitrader-[0-9a-f]{8}-[0-9a-f-]{27,}\b", re.IGNORECASE)
@@ -1590,6 +1610,11 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log.info("Messaggio Telegram ignorato da account bot: @%s", update.effective_user.username or update.effective_user.id)
         return
     testo = msg.text or ""
+    # Il messaggio continua a essere archiviato e visibile nel Topic, ma non
+    # avvia alcuna risposta automatica finche' l'admin non la riaccende.
+    if not AI_AUTOREPLY_ENABLED and not is_admin_chat(update.effective_chat.id):
+        await record_message(update, "in", testo, "lead")
+        return
     testo_lower = testo.lower()
     categorie_richieste = (
         any(x in testo_lower for x in ("come funziona il bot", "bot automatico", "copy trading")),
@@ -2080,7 +2105,7 @@ def main():
     threading.Thread(target=start_health_server, daemon=True, name="health-server").start()
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     app.add_error_handler(on_error)
-    for cmd, fn in {"start":start,"help":help_cmd,"registrazione":registration,"sala_segnali":signals,"verifica_ib":verify_ib,"deposito":deposit,"guida_bot":guide,"screenshot":screenshot,"intervento_umano":human,"attiva_supporto":activate_support_forum,"statistiche_canale":channel_stats}.items():
+    for cmd, fn in {"start":start,"help":help_cmd,"registrazione":registration,"sala_segnali":signals,"verifica_ib":verify_ib,"deposito":deposit,"guida_bot":guide,"screenshot":screenshot,"intervento_umano":human,"attiva_supporto":activate_support_forum,"statistiche_canale":channel_stats,"ai_accendi":ai_global_control,"ai_spegni":ai_global_control}.items():
         app.add_handler(CommandHandler(cmd, fn))
     app.add_handler(ChatJoinRequestHandler(channel_join_request))
     app.add_handler(ChatMemberHandler(signal_room_member_update, ChatMemberHandler.CHAT_MEMBER))
