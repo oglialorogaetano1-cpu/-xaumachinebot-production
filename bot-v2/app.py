@@ -869,7 +869,12 @@ async def google_translate_to_italian(text: str) -> tuple[str, bool, str]:
             log.warning("Google Translate verso italiano fallito %s: %s", r.status_code, r.text[:200])
         except Exception as exc:
             log.warning("Google Translate verso italiano non disponibile: %s", exc)
-    return await ai_translate_to_italian(text)
+    # La traduzione del Topic deve essere deterministica.  Un modello
+    # conversazionale può interpretare una domanda e rispondere invece di
+    # tradurla, creando un falso messaggio interno.  Se Google non è
+    # disponibile, conserva solo l'originale: non inventare mai una
+    # "traduzione italiana".
+    return text, False, ""
 
 
 async def ai_translate_to_italian(text: str) -> tuple[str, bool, str]:
