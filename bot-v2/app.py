@@ -907,6 +907,14 @@ def topic_identity_name(user) -> str:
     return re.sub(r"\s+", " ", f"{identity} · {flag} {location}").strip()[:120]
 
 
+def ai_control_keyboard() -> InlineKeyboardMarkup:
+    """Controls that always apply to the customer of the current Topic."""
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("⛔ Ferma IA", callback_data="ai:stop"),
+        InlineKeyboardButton("✅ Riattiva IA", callback_data="ai:on"),
+    ]])
+
+
 async def ensure_customer_topic(update: Update) -> int | None:
     """Crea un Topic per il cliente, riusando sempre quello gia' salvato."""
     forum_chat_id = support_forum_chat_id()
@@ -951,7 +959,9 @@ async def ensure_customer_topic(update: Update) -> int | None:
             message_thread_id=thread_id,
             text=(f"👤 Nuova conversazione\nNome: {topic_name}\n"
                   f"Username: {username}\nTelegram ID: {user.id}\n\n"
-                  "Rispondi direttamente in questo Topic: il bot inoltrera' il messaggio al cliente."),
+                  "Rispondi direttamente in questo Topic: il bot inoltrera' il messaggio al cliente.\n"
+                  "Usa i pulsanti qui sotto per fermare o riattivare l'IA."),
+            reply_markup=ai_control_keyboard(),
         )
         return thread_id
     except Exception as exc:
@@ -997,6 +1007,7 @@ async def mirror_text_to_forum(update: Update, direction: str, body: str,
             message_thread_id=thread_id,
             text=f"{label}\n{topic_body}",
             disable_web_page_preview=True,
+            reply_markup=ai_control_keyboard(),
         )
     except Exception as exc:
         log.warning("Inoltro testo al Topic fallito: %s", exc)
@@ -1117,6 +1128,35 @@ async def forum_operator_message(update: Update, context: ContextTypes.DEFAULT_T
     except Exception as exc:
         log.warning("Risposta Topic -> cliente fallita: %s", exc)
         await msg.reply_text("⚠️ Invio al cliente non riuscito. Riprova tra poco.")
+
+
+async def ai_control_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Apply the inline control to the customer mapped to this Topic."""
+    query = update.callback_query
+    message = query.message if query else None
+    forum_chat_id = support_forum_chat_id()
+    if (not query or not message or not forum_chat_id
+            or str(message.chat_id) != forum_chat_id
+            or not message.is_topic_message or not message.message_thread_id):
+        return
+    action = (query.data or "").split(":", 1)[-1]
+    if action not in {"stop", "on"}:
+        return
+    mapping = await crm_topic_lookup(message_thread_id=message.message_thread_id)
+    if not mapping.get("telegram_chat_id"):
+        await query.answer("Topic non collegato a un cliente.", show_alert=True)
+        return
+    result = await crm_set_ai_control(int(mapping["telegram_chat_id"]), action)
+    if not result.get("ok"):
+        await query.answer("Non riesco a modificare lo stato dell'IA. Riprova.", show_alert=True)
+        return
+    if action == "stop":
+        await query.answer("IA fermata per questo cliente.")
+        confirmation = "⛔ IA sospesa per questo cliente. Per riprenderla premi “✅ Riattiva IA”."
+    else:
+        await query.answer("IA riattivata per questo cliente.")
+        confirmation = "✅ IA riattivata per questo cliente: risponderà ai suoi nuovi messaggi."
+    await message.reply_text(confirmation, reply_markup=ai_control_keyboard())
 
 
 
@@ -2353,6 +2393,7 @@ def main():
     for cmd, fn in {"start":start,"help":help_cmd,"registrazione":registration,"verifica_ib":verify_ib,"deposito":deposit,"guida_bot":guide,"screenshot":screenshot,"intervento_umano":human,"attiva_supporto":activate_support_forum,"statistiche_canale":channel_stats}.items():
         app.add_handler(CommandHandler(cmd, fn))
     app.add_handler(ChatJoinRequestHandler(channel_join_request))
+    app.add_handler(CallbackQueryHandler(ai_control_callback, pattern=r"^ai:(?:stop|on)$"))
     app.add_handler(CallbackQueryHandler(payment_review_callback, pattern=r"^pay:(?:approve|reject):"))
     app.add_handler(MessageHandler(filters.ChatType.SUPERGROUP, forum_operator_message), group=1)
     app.add_handler(MessageHandler(filters.PHOTO & filters.ChatType.PRIVATE, payment_screenshot_message))
