@@ -414,6 +414,9 @@ async def attendi_e_invia_screenshot(context: ContextTypes.DEFAULT_TYPE, chat_id
     """Fa polling della riga finche' il worker MT5 sulla VPS non la segna
     'fatto' (o 'errore'), poi manda la foto nella stessa chat. Timeout
     totale: ~tentativi_max * attesa_secondi (default 60s)."""
+    if not CUSTOMER_AUTO_REPLY_ENABLED:
+        log.info("Invio automatico screenshot MT5 ignorato: risposte clienti disattivate")
+        return
     for _ in range(tentativi_max):
         await asyncio.sleep(attesa_secondi)
         try:
@@ -1002,7 +1005,13 @@ async def mirror_text_to_forum(update: Update, direction: str, body: str,
         italian, translated, detected_language = await google_translate_to_italian(topic_body)
         if detected_language and detected_language != "ai":
             await crm_store_language_code(update, detected_language)
-        if translated and italian.casefold() != topic_body.casefold():
+        # Per il cliente italiano non mostrare una seconda copia etichettata
+        # come traduzione, nemmeno se il servizio modifica lievemente punteggiatura
+        # o maiuscole. La resa italiana serve solo allo staff per lingue estere.
+        is_italian_source = detected_language == "it" or str(
+            getattr(update.effective_user, "language_code", "") or ""
+        ).lower().startswith("it")
+        if translated and not is_italian_source and italian.casefold() != topic_body.casefold():
             topic_body = f"{topic_body}\n\n🇮🇹 Traduzione italiana: {italian}"
         log.info(
             "Traduzione Topic cliente: eseguita=%s lingua_rilevata=%s",
@@ -1313,6 +1322,9 @@ async def crm_business_connection_id(chat_id: int | str) -> str | None:
 
 
 async def poll_operator_outbox(app) -> None:
+    if not CUSTOMER_AUTO_REPLY_ENABLED:
+        log.info("Coda CRM verso clienti disattivata: gestione manuale nei Topic")
+        return
     headers = dict(CRM_HEADERS); headers.pop("Prefer", None)
     await asyncio.sleep(3)
     while True:
@@ -1397,7 +1409,7 @@ async def full_followup_transcript(conversation_id: str) -> str:
 
 async def smart_followup_sweep() -> None:
     """Claim due follow-ups, write a contextual draft, then queue it safely."""
-    if not FOLLOWUP_AUTOMATION_ENABLED or not CRM_TRACKING_SECRET:
+    if not CUSTOMER_AUTO_REPLY_ENABLED or not FOLLOWUP_AUTOMATION_ENABLED or not CRM_TRACKING_SECRET:
         return
     headers = dict(CRM_HEADERS); headers.pop("Prefer", None)
     async with httpx.AsyncClient(timeout=25) as client:
@@ -1443,6 +1455,9 @@ async def smart_followup_sweep() -> None:
 
 
 async def poll_smart_followups() -> None:
+    if not CUSTOMER_AUTO_REPLY_ENABLED:
+        log.info("Follow-up automatici disattivati: nessun messaggio programmato sara' creato")
+        return
     await asyncio.sleep(12)
     while True:
         try:
@@ -2436,8 +2451,11 @@ async def post_init(app):
     if configured_forum:
         ACTIVE_SUPPORT_FORUM_CHAT_ID = configured_forum
     log.info("Telegram support Forum configured: %s", bool(support_forum_chat_id()))
-    app.create_task(poll_operator_outbox(app), name="crm-operator-outbox")
-    app.create_task(poll_smart_followups(), name="crm-smart-followups")
+    if CUSTOMER_AUTO_REPLY_ENABLED:
+        app.create_task(poll_operator_outbox(app), name="crm-operator-outbox")
+        app.create_task(poll_smart_followups(), name="crm-smart-followups")
+    else:
+        log.info("Modalita' manuale attiva: AI, coda CRM e follow-up verso clienti sono bloccati")
 
 def main():
     threading.Thread(target=start_health_server, daemon=True, name="health-server").start()
