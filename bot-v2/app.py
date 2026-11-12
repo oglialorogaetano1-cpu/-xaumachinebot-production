@@ -26,6 +26,10 @@ ACTIVE_SUPPORT_FORUM_CHAT_ID = SUPPORT_FORUM_CHAT_ID
 CRM_TRACKING_SECRET = os.environ.get("CRM_TRACKING_SECRET", "")
 CRM_TENANT_SLUG = os.environ.get("CRM_TENANT_SLUG", "xau-machine")
 FOLLOWUP_AUTOMATION_ENABLED = os.environ.get("FOLLOWUP_AUTOMATION_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
+# Default sicuro: il bot non invia risposte automatiche ai clienti. Continua
+# invece a tradurre i messaggi scritti manualmente dallo staff nei Topic.
+# Per riabilitare in futuro serve un'esplicita variabile Railway impostata a true.
+CUSTOMER_AUTO_REPLY_ENABLED = os.environ.get("CUSTOMER_AUTO_REPLY_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
 MT5_INVESTOR_PLATFORM = os.environ.get("MT5_INVESTOR_PLATFORM", "")
 MT5_INVESTOR_BROKER = os.environ.get("MT5_INVESTOR_BROKER", "")
 MT5_INVESTOR_SERVER = os.environ.get("MT5_INVESTOR_SERVER", "")
@@ -1017,6 +1021,26 @@ async def mirror_text_to_forum(update: Update, direction: str, body: str,
         log.warning("Inoltro testo al Topic fallito: %s", exc)
 
 
+async def mirror_photo_to_forum(update: Update) -> None:
+    """Inoltra una foto del cliente al suo Topic, senza rispondergli."""
+    msg = update.effective_message
+    forum_chat_id = support_forum_chat_id()
+    if not msg or not msg.photo or not forum_chat_id:
+        return
+    thread_id = await ensure_customer_topic(update)
+    if not thread_id:
+        return
+    try:
+        await update.get_bot().send_photo(
+            chat_id=int(forum_chat_id),
+            message_thread_id=thread_id,
+            photo=msg.photo[-1].file_id,
+            caption=f"👤 Cliente · Foto ricevuta\n{(msg.caption or '')[:900]}",
+        )
+    except Exception as exc:
+        log.warning("Inoltro foto al Topic fallito: %s", exc)
+
+
 async def crm_record_forum_reply(mapping: dict, body: str) -> None:
     """Registra la risposta umana senza rimandarla una seconda volta al Topic."""
     headers = dict(CRM_HEADERS)
@@ -1787,6 +1811,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     deep_link_code = context.args[0] if context.args else "tg_direct"
     await track_start(update, deep_link_code)
     await record_message(update, "in", msg.text or "/start", "lead")
+    if not CUSTOMER_AUTO_REPLY_ENABLED:
+        return
     welcome_message = await get_welcome_message(deep_link_code)
     await msg.reply_text(welcome_message, disable_web_page_preview=True)
     await record_message(update, "out", welcome_message, "ai")
@@ -1827,6 +1853,9 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     if msg is None:
         return
+    if not CUSTOMER_AUTO_REPLY_ENABLED:
+        await record_message(update, "in", msg.text or "/help", "lead")
+        return
     await msg.reply_text("/registrazione - link e procedura\n/verifica_ib - verifica iscrizione\n/deposito - stato deposito\n/guida_bot - guida attivazione\n/screenshot - richiedi aggiornamento MT5\n/intervento_umano - parla con un operatore")
 
 async def simple_reply(update, text):
@@ -1834,6 +1863,8 @@ async def simple_reply(update, text):
     if msg is None:
         return
     await record_message(update, "in", msg.text or "", "lead")
+    if not CUSTOMER_AUTO_REPLY_ENABLED:
+        return
     await msg.reply_text(text)
     await record_message(update, "out", text, "ai")
 
@@ -1844,6 +1875,8 @@ async def verify_ib(update, context):
         return
     testo = msg.text or "/verifica_ib"
     await record_message(update, "in", testo, "lead")
+    if not CUSTOMER_AUTO_REPLY_ENABLED:
+        return
     verifica = await crm_puprime_context(update, testo)
     if verifica.get("status") == "matched":
         risposta = (
@@ -1866,6 +1899,9 @@ async def guide(update, context): await simple_reply(update, "Quando l'iscrizion
 async def screenshot(update, context):
     msg = update.effective_message
     testo = (msg.text if msg else "") or "/screenshot"
+    if not CUSTOMER_AUTO_REPLY_ENABLED:
+        await record_message(update, "in", testo, "lead")
+        return
     await richiedi_screenshot_mt5(update, context, "oggi", testo)
 
 async def human(update, context):
@@ -1876,7 +1912,8 @@ async def human(update, context):
     await record_message(update)
     chat_id = str(chat.id)
     await crm_insert("crm_human_handoffs", {"reason": "Richiesta operatore dal bot v2", "priority": "high", "status": "open", "channels": ["telegram","email","whatsapp","ringover"], "metadata": {"telegram_chat_id": chat_id}})
-    await msg.reply_text("Ho registrato la richiesta e avvisato l'operatore.")
+    if CUSTOMER_AUTO_REPLY_ENABLED:
+        await msg.reply_text("Ho registrato la richiesta e avvisato l'operatore.")
     if ADMIN_CHAT_ID:
         try:
             await context.bot.send_message(chat_id=int(ADMIN_CHAT_ID), text=f"Nuova richiesta operatore dal chat {chat_id}")
@@ -1897,6 +1934,11 @@ async def text_message(
         log.info("Messaggio Telegram ignorato da account bot: @%s", update.effective_user.username or update.effective_user.id)
         return
     testo = (text_override if text_override is not None else msg.text) or ""
+    # Lo storico e la traduzione nel Topic continuano a essere aggiornati,
+    # ma finché lo staff risponde a mano nessun messaggio viene inviato al cliente.
+    if not CUSTOMER_AUTO_REPLY_ENABLED:
+        await record_message(update, "in", testo, "lead")
+        return
     # Anche i messaggi ricevuti via Telegram Business possono ricevere una
     # risposta AI: lo stato nel CRM decide se l'AI e' attiva. Una risposta
     # manuale dell'operatore nel Topic la mette in pausa fino al comando
@@ -2012,6 +2054,9 @@ async def voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if update.effective_user and update.effective_user.is_bot:
         return
+    if not CUSTOMER_AUTO_REPLY_ENABLED:
+        await record_message(update, "in", "[Messaggio vocale ricevuto]", "lead")
+        return
     try:
         telegram_file = await msg.voice.get_file()
         transcript = await transcribe_voice(
@@ -2044,6 +2089,10 @@ async def payment_screenshot_message(update: Update, context: ContextTypes.DEFAU
     if not msg or not chat or not user or not msg.photo:
         return
     caption = msg.caption or ""
+    if not CUSTOMER_AUTO_REPLY_ENABLED:
+        await record_message(update, "in", "[Foto ricevuta] " + caption, "lead")
+        await mirror_photo_to_forum(update)
+        return
     match = ORDER_ID_RE.search(caption)
     if not match:
         await msg.reply_text(
