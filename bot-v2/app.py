@@ -224,6 +224,10 @@ Per le performance usa solo dati reali restituiti dal worker MT5 autorizzato; no
 # disclosed by the verified-onboarding flow after the CRM has matched the
 # customer to the correct PU Prime/IB registration.
 PRIVATE_STRATEGY_IDENTIFIERS = (
+    "NEXORA AI",
+    "B10175523",
+    # Previous activation data remain private too: this blocks any stale CRM
+    # prompt or chat history from exposing them before verification.
     "XAU EXTREME GENIMI",
     "B10173815",
 )
