@@ -26,10 +26,10 @@ ACTIVE_SUPPORT_FORUM_CHAT_ID = SUPPORT_FORUM_CHAT_ID
 CRM_TRACKING_SECRET = os.environ.get("CRM_TRACKING_SECRET", "")
 CRM_TENANT_SLUG = os.environ.get("CRM_TENANT_SLUG", "xau-machine")
 FOLLOWUP_AUTOMATION_ENABLED = os.environ.get("FOLLOWUP_AUTOMATION_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
-# Default sicuro: il bot non invia risposte automatiche ai clienti. Continua
-# invece a tradurre i messaggi scritti manualmente dallo staff nei Topic.
-# Per riabilitare in futuro serve un'esplicita variabile Railway impostata a true.
-CUSTOMER_AUTO_REPLY_ENABLED = os.environ.get("CUSTOMER_AUTO_REPLY_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
+# Blocco amministrativo temporaneo: il bot non invia risposte automatiche ai
+# clienti, anche se una vecchia variabile Railway avesse un valore diverso.
+# Restano attivi soltanto inoltro nei Topic e traduzione dei messaggi manuali.
+CUSTOMER_AUTO_REPLY_ENABLED = False
 MT5_INVESTOR_PLATFORM = os.environ.get("MT5_INVESTOR_PLATFORM", "")
 MT5_INVESTOR_BROKER = os.environ.get("MT5_INVESTOR_BROKER", "")
 MT5_INVESTOR_SERVER = os.environ.get("MT5_INVESTOR_SERVER", "")
