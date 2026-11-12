@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import httpx
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import Application, CallbackQueryHandler, ChatJoinRequestHandler, ChatMemberHandler, CommandHandler, MessageHandler, ContextTypes, filters
+from telegram.ext import Application, ApplicationHandlerStop, CallbackQueryHandler, ChatJoinRequestHandler, ChatMemberHandler, CommandHandler, MessageHandler, ContextTypes, filters
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("xau-bot-v2")
@@ -45,6 +45,9 @@ GOOGLE_TRANSLATE_API_KEY = os.environ.get("GOOGLE_TRANSLATE_API_KEY", "").strip(
 # L'AI parte volutamente spenta a ogni avvio: l'amministratore la abilita
 # esplicitamente dal proprio Telegram con /ai_accendi e la blocca con /ai_spegni.
 AI_AUTOREPLY_ENABLED = False
+# Modalita' operatore: nessun flusso automatico verso i clienti. Il bot resta
+# connesso per archiviare i messaggi nei Topic e tradurli per lo staff.
+AUTOMATED_FLOWS_ENABLED = False
 SIGNAL_ROOM_URL = "https://t.me/+-e1_tDFps0Q2YmE0"
 SIGNAL_ROOM_SOURCE = "signal_room_24h"
 SIGNAL_ROOM_WELCOME_MESSAGE = (
@@ -154,6 +157,14 @@ async def ai_global_control(update: Update, _context: ContextTypes.DEFAULT_TYPE)
     stato = "attivata" if AI_AUTOREPLY_ENABLED else "fermata"
     await msg.reply_text(f"✅ AI {stato} per tutti i clienti.")
     log.info("AI globale %s dall'amministratore", "attivata" if AI_AUTOREPLY_ENABLED else "fermata")
+
+
+async def block_customer_commands_in_manual_mode(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
+    """In modalita' manuale non risponde neppure ai comandi dei clienti."""
+    chat = update.effective_chat
+    if not AUTOMATED_FLOWS_ENABLED and chat and not is_admin_chat(chat.id):
+        await record_message(update, "in", update.effective_message.text or "", "lead")
+        raise ApplicationHandlerStop
 
 
 ORDER_ID_RE = re.compile(r"\baitrader-[0-9a-f]{8}-[0-9a-f-]{27,}\b", re.IGNORECASE)
@@ -1711,6 +1722,11 @@ async def payment_screenshot_message(update: Update, context: ContextTypes.DEFAU
     if not msg or not chat or not user or not msg.photo:
         return
     caption = msg.caption or ""
+    if not AUTOMATED_FLOWS_ENABLED:
+        # La foto resta tracciata nel CRM/Topic, senza richieste o messaggi
+        # automatici al cliente.
+        await record_message(update, "in", caption or "[Foto ricevuta]", "lead")
+        return
     match = ORDER_ID_RE.search(caption)
     if not match:
         await msg.reply_text(
@@ -2105,6 +2121,7 @@ def main():
     threading.Thread(target=start_health_server, daemon=True, name="health-server").start()
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     app.add_error_handler(on_error)
+    app.add_handler(MessageHandler(filters.COMMAND & filters.ChatType.PRIVATE, block_customer_commands_in_manual_mode), group=-1)
     for cmd, fn in {"start":start,"help":help_cmd,"registrazione":registration,"sala_segnali":signals,"verifica_ib":verify_ib,"deposito":deposit,"guida_bot":guide,"screenshot":screenshot,"intervento_umano":human,"attiva_supporto":activate_support_forum,"statistiche_canale":channel_stats,"ai_accendi":ai_global_control,"ai_spegni":ai_global_control}.items():
         app.add_handler(CommandHandler(cmd, fn))
     app.add_handler(ChatJoinRequestHandler(channel_join_request))
