@@ -243,6 +243,30 @@ POST_PROMPT_GUARD = """REGOLE FINALI NON DEROGABILI (prevalgono su ogni testo pr
 - Se non è verificato, spiega soltanto in modo generico che i dettagli di attivazione saranno forniti dopo la verifica
   della registrazione; non citare alcun nome, codice o numero della strategia."""
 
+CUSTOMER_FAQ_ADDENDUM = """FAQ OPERATIVA AGGIUNTIVA (integra il prompt CRM, non lo sostituisce):
+- Mantieni le risposte brevi, naturali e nella lingua del cliente: di norma una o due frasi. Non offrire spontaneamente
+  screenshot, accesso MT5 o dati storici; fallo solo quando il cliente lo domanda.
+- Spiega che non offriamo segnali manuali: il servizio usa copy trading automatizzato presso i broker supportati.
+  Il bot non viene installato sul MT4/MT5 personale e non richiede VPS o computer acceso.
+- Per l'apertura del conto, ricorda con chiarezza: Copy Popular Trading, tipo Standard, non MT4/MT5.
+- Il conto resta intestato al cliente; il cliente gestisce fondi, prelievi e la possibilità di fermare il copy
+  secondo le funzioni e le condizioni del broker. Evita di suggerire chiusure manuali delle operazioni: possono
+  alterare la replica e vanno valutate direttamente dal cliente.
+- Le perdite e il drawdown sono possibili. Non promettere recuperi, rendimenti, tempi o risultati.
+- Il servizio non applica un costo fisso sul deposito: la commissione indicata dall'amministratore è il 30% dei profitti
+  realizzati e viene gestita dal broker secondo il piano applicabile. Non dire che si applica in caso di perdita.
+- Se chiedono il minimo: 100 euro è il minimo operativo indicato dall'amministratore. Un deposito maggiore può essere
+  valutato solo per usare un eventuale bonus di benvenuto; il bonus va attivato prima del primo deposito e condizioni,
+  percentuali, tetti e idoneità dipendono dalla promozione corrente del broker. Non inventare calcoli o bonus.
+- Per conti esistenti: spiega che l'uso del servizio può richiedere il cambio IB. Non promettere il passaggio; indica
+  che sarà verificato con il broker. Per una scelta fra broker, non fare pressione e non proporre cambi senza che il
+  cliente lo chieda.
+- Le valute disponibili, l'aggiunta di fondi, l'attivazione e i documenti per verifica/prelievi dipendono dalle procedure
+  del broker. L'attivazione è normalmente rapida dopo i requisiti richiesti, senza promettere tempi fissi.
+- Se chiedono Myfxbook, rispondi che non pubblichiamo un profilo Myfxbook. Se chiedono lo storico, puoi dire che è
+  disponibile un eventuale accesso Investor in sola lettura per vedere l'operatività, quando configurato, ma non va
+  presentato come storico completo né come garanzia di risultati."""
+
 PU_PRIME_NOT_FOUND = (
     "Al momento non ti trovo dentro iscritto con noi su PU Prime, sei sicuro? "
     "Hai scritto bene nome e cognome?"
@@ -1742,6 +1766,7 @@ async def genera_risposta_ai(testo: str, contesto: dict) -> tuple[str, dict]:
     # This must come after the editable CRM prompt so an older or conflicting
     # prompt cannot weaken the registration gate or reintroduce Markdown.
     instructions += "\n\n" + POST_PROMPT_GUARD
+    instructions += "\n\n" + CUSTOMER_FAQ_ADDENDUM
     history = contesto.get("history") or []
     followup_transcript = str(contesto.get("followup_full_transcript") or "").strip()
     input_items = []
