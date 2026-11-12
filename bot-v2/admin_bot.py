@@ -367,7 +367,19 @@ async def openai_json(chat_id, text):
         SYSTEM + "\n\nRispondi esclusivamente con un oggetto JSON valido, senza markdown o testo esterno.",
         items[1:],
     )
-    return json.loads(raw)
+    # Claude and the fallback can occasionally wrap an otherwise valid object
+    # in a Markdown fence.  Treat that as a formatting issue, not an outage.
+    candidate = raw.strip()
+    if candidate.startswith("```"):
+        candidate = re.sub(r"^```(?:json)?\\s*", "", candidate, flags=re.IGNORECASE)
+        candidate = re.sub(r"\\s*```$", "", candidate).strip()
+    try:
+        return json.loads(candidate)
+    except json.JSONDecodeError:
+        start, end = candidate.find("{"), candidate.rfind("}")
+        if start < 0 or end <= start:
+            raise
+        return json.loads(candidate[start : end + 1])
 
 
 async def openai_text(text):
