@@ -1848,12 +1848,16 @@ async def improvement_recap(application, weekly=False):
     )[:100000]
     cadence = "settimanale" if weekly else "giornaliero"
     request = (
-        f"Crea un recap {cadence} per l'amministratore del customer service trading "
-        f"su {len(messages)} messaggi delle ultime {hours} ore. Individua domande ricorrenti, "
-        "dubbi, obiezioni, qualità delle risposte e ostacoli che rallentano iscrizione o deposito. "
-        "Suggerisci una sola istruzione breve, concreta e conforme da aggiungere al prompt. "
-        "Non fare promesse di rendimento, non esercitare pressione e non fornire consulenza finanziaria. "
-        "Rispondi ESATTAMENTE in JSON con recap e prompt_instruction; prompt_instruction deve avere 20-800 caratteri.\n\n"
+        f"Sei l'analista passivo {cadence} del customer service. Leggi {len(messages)} messaggi "
+        f"delle ultime {hours} ore e prepara un recap per l'amministratore: domande ricorrenti, "
+        "risposte poco chiare o incoerenti, richieste rimaste senza risposta, obiezioni, passaggi "
+        "in cui la conversazione si blocca e differenze tra risposta manuale e automatica. "
+        "Per ogni problema indica una causa probabile e una proposta concreta, breve e verificabile. "
+        "Non applicare modifiche, non riscrivere il prompt e non affermare che una regola è attiva. "
+        "L'amministratore discuterà con te prima di qualsiasi modifica. Non fare promesse di rendimento, "
+        "non esercitare pressione e non fornire consulenza finanziaria. "
+        "Rispondi ESATTAMENTE in JSON con recap e prompt_instruction; prompt_instruction deve contenere "
+        "solo la migliore proposta da discutere, tra 20 e 800 caratteri.\n\n"
         + transcript
     )
     try:
@@ -1863,31 +1867,15 @@ async def improvement_recap(application, weekly=False):
     except Exception:
         log.exception("Continuous improvement AI analysis failed")
         return
-    change = None
-    if len(instruction) >= 20:
-        try:
-            reviewed = await reconcile_prompt_change(
-                f"Miglioramento {cadence} {datetime.now(ROME).date().isoformat()}", instruction
-            )
-            change = {"action": "prompt_update", "payload": {
-                "name": reviewed["name"],
-                "release_revision": reviewed["release_revision"],
-                "content": reviewed["content"],
-                "replace": True,
-                "reviewed_against_version": True,
-            }}
-        except PromptChangeNotApplicable as exc:
-            recap += "\n\nNessuna modifica prompt preparata: " + str(exc)
-        except Exception:
-            log.exception("Continuous improvement prompt reconciliation failed")
-            recap += "\n\nNessuna modifica prompt preparata: verifica tecnica non disponibile."
     for chat_id in admin_recipients():
-        if change:
-            with closing(sqlite3.connect(DB_PATH)) as conn:
-                conn.execute("INSERT OR REPLACE INTO pending_changes(chat_id,payload,created_at) VALUES(?,?,?)", (str(chat_id), json.dumps(change), now()))
-                conn.commit()
-        suffix = (f"\n\nRelease proposta: v.{change['payload']['release_revision']} · {len(change['payload']['content'])} caratteri. Usa /conferma per applicarla o /annulla." if change else "")
-        await application.bot.send_message(chat_id=int(chat_id), text=(f"📈 Recap {cadence} CRM\n\n{recap}" + suffix)[:4000])
+        proposal = (
+            f"\n\nProposta da discutere:\n{instruction}\n\n"
+            "Rispondimi qui con cosa cambieresti: preparerò una modifica del prompt solo dopo il confronto e la tua conferma."
+            if len(instruction) >= 20 else ""
+        )
+        await application.bot.send_message(
+            chat_id=int(chat_id), text=(f"📈 Recap {cadence} CRM\n\n{recap}" + proposal)[:4000]
+        )
 
 
 async def continuous_improvement(application):
