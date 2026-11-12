@@ -1508,6 +1508,19 @@ def asks_prompt_status(text: str) -> bool:
     return asks_if_applied and refers_to_prompt
 
 
+def global_ai_intent(text: str) -> bool | None:
+    """Handle the administrator's natural global AI commands without AI."""
+    normalized = " ".join((text or "").casefold().split())
+    refers_to_ai = bool(re.search(r"\b(ai|ia|intelligenza artificiale)\b", normalized))
+    if not refers_to_ai:
+        return None
+    if re.search(r"\b(accendi|attiva|riattiva|riprendi)\w*\b", normalized):
+        return True
+    if re.search(r"\b(spegni|ferma|blocca|disattiva)\w*\b", normalized):
+        return False
+    return None
+
+
 async def reply_prompt_status(update: Update, chat_id: int):
     """Give a read-back from the active CRM version rather than a guessed answer."""
     try:
@@ -1554,6 +1567,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text):
         return
     chat_id = update.effective_chat.id
     remember(chat_id, "user", text)
+    requested_global_ai_state = global_ai_intent(text)
+    if requested_global_ai_state is not None:
+        await set_global_ai_status(update, requested_global_ai_state)
+        return
     if asks_prompt_status(text):
         await reply_prompt_status(update, chat_id)
         return
