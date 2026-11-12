@@ -38,6 +38,7 @@ SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 CRM_SECRET = os.environ["CRM_TRACKING_SECRET"]
 TENANT_SLUG = os.environ.get("CRM_TENANT_SLUG", "xau-machine").strip()
 SUPPORT_FORUM_CHAT_ID = os.environ.get("SUPPORT_FORUM_CHAT_ID", "").strip()
+GLOBAL_AI_CONTROL_CHAT_ID = 0
 ADMIN_IDS = {item.strip() for item in os.environ.get("ADMIN_CHAT_ID", "").split(",") if item.strip()}
 BOOTSTRAP_CODE = os.environ.get("ADMIN_BOOTSTRAP_CODE", "")
 DB_PATH = Path(os.environ.get("ADMIN_MEMORY_DB", "/data/admin-bot.sqlite3"))
@@ -807,6 +808,77 @@ async def customer_ai_status(reference):
     return target, bool(response.json())
 
 
+async def global_ai_status() -> bool | None:
+    async with httpx.AsyncClient(timeout=20) as client:
+        response = await client.post(
+            f"{SUPABASE_URL}/rest/v1/rpc/crm_get_ai_status",
+            headers=supabase_headers(),
+            json={
+                "p_secret": CRM_SECRET,
+                "p_tenant_slug": TENANT_SLUG,
+                "p_telegram_chat_id": GLOBAL_AI_CONTROL_CHAT_ID,
+            },
+        )
+    if response.status_code >= 300:
+        raise RuntimeError(f"CRM {response.status_code}")
+    return bool(response.json())
+
+
+async def set_global_ai_status(update: Update, enabled: bool) -> None:
+    if not authorized(update):
+        return
+    mode = "on" if enabled else "stop"
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            response = await client.post(
+                f"{SUPABASE_URL}/rest/v1/rpc/crm_set_ai_control",
+                headers=supabase_headers(),
+                json={
+                    "p_secret": CRM_SECRET,
+                    "p_tenant_slug": TENANT_SLUG,
+                    "p_telegram_chat_id": GLOBAL_AI_CONTROL_CHAT_ID,
+                    "p_mode": mode,
+                },
+            )
+        data = response.json() if response.status_code < 300 else {}
+        if response.status_code >= 300 or not isinstance(data, dict) or not data.get("ok"):
+            raise RuntimeError(f"CRM {response.status_code}")
+    except Exception:
+        log.exception("Global AI control failed")
+        await update.effective_message.reply_text("⚠️ Non riesco a modificare l'interruttore generale IA. Nessun cliente è stato modificato.")
+        return
+    if enabled:
+        await update.effective_message.reply_text(
+            "✅ IA generale attiva. Le risposte automatiche riprendono solo per i clienti che non sono stati sospesi nel loro Topic."
+        )
+    else:
+        await update.effective_message.reply_text(
+            "⛔ IA generale disattivata. Da ora nessun cliente riceverà risposte automatiche; i controlli nei singoli Topic restano invariati."
+        )
+
+
+async def enable_global_ai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await set_global_ai_status(update, True)
+
+
+async def disable_global_ai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await set_global_ai_status(update, False)
+
+
+async def show_global_ai_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not authorized(update):
+        return
+    try:
+        enabled = await global_ai_status()
+    except Exception:
+        log.exception("Global AI status lookup failed")
+        await update.effective_message.reply_text("⚠️ Non riesco a leggere lo stato generale IA dal CRM in questo momento.")
+        return
+    await update.effective_message.reply_text(
+        "✅ IA generale attiva." if enabled else "⛔ IA generale disattivata."
+    )
+
+
 def ai_status_reference(text):
     """Recognise plain Italian questions such as 'IA attiva per @utente?'"""
     if not AI_STATUS_QUERY_RE.search(str(text or "")):
@@ -1153,7 +1225,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log.warning("Admin bot access denied for Telegram user %s", getattr(update.effective_user, "id", "unknown"))
         await update.effective_message.reply_text("⛔ Questo bot e' riservato agli amministratori autorizzati.")
         return
-    await update.effective_message.reply_text("✅ Console amministratore XAU Machine attiva.\n\nDirezione: /briefing · /conversazioni · /analizza <id>\nCRM: /lead nome | lingua | campagna | nota · /stato id | stato · /etichette conversazione | tag1,tag2\nAutomazioni: /regola nome | stato_lead | minuti | messaggio | canale · /followup_list · /followup @username | obiettivo\nCanali e topic: /canale nome | url | lingua | codice | prodotto · /argomento utente:ID o thread:ID · /topic utente | chat | thread | nome\nAI/vendite: /prompt Nome | testo · file .txt prompt · /invia chat | conversazione | testo · /verificato @username · /nondepositati messaggio\nRipristino: /ripristina_telegram recupera tutto lo storico delle modifiche ai prompt confermate.\n\nLe modifiche e gli invii richiedono sempre /conferma.")
+    await update.effective_message.reply_text("✅ Console amministratore XAU Machine attiva.\n\nDirezione: /briefing · /conversazioni · /analizza <id>\nCRM: /lead nome | lingua | campagna | nota · /stato id | stato · /etichette conversazione | tag1,tag2\nAutomazioni: /regola nome | stato_lead | minuti | messaggio | canale · /followup_list · /followup @username | obiettivo\nCanali e topic: /canale nome | url | lingua | codice | prodotto · /argomento utente:ID o thread:ID · /topic utente | chat | thread | nome\nIA generale: /accendi_ai · /spegni_ai · /ai_generale\nAI/vendite: /prompt Nome | testo · file .txt prompt · /invia chat | conversazione | testo · /verificato @username · /nondepositati messaggio\nRipristino: /ripristina_telegram recupera tutto lo storico delle modifiche ai prompt confermate.\n\nLe modifiche e gli invii richiedono sempre /conferma.")
 
 
 async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1845,6 +1917,9 @@ def main():
     app.add_handler(CommandHandler("regola", prepare_rule))
     app.add_handler(CommandHandler("stato", prepare_status))
     app.add_handler(CommandHandler("ai_stato", ai_status_command))
+    app.add_handler(CommandHandler("accendi_ai", enable_global_ai))
+    app.add_handler(CommandHandler("spegni_ai", disable_global_ai))
+    app.add_handler(CommandHandler("ai_generale", show_global_ai_status))
     app.add_handler(CommandHandler("etichette", prepare_labels))
     app.add_handler(CommandHandler("conferma", confirm))
     app.add_handler(CommandHandler("annulla", cancel))

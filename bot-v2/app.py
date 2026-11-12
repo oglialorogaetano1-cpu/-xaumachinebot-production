@@ -25,6 +25,9 @@ SUPPORT_FORUM_CHAT_ID = os.environ.get("SUPPORT_FORUM_CHAT_ID", "").strip()
 ACTIVE_SUPPORT_FORUM_CHAT_ID = SUPPORT_FORUM_CHAT_ID
 CRM_TRACKING_SECRET = os.environ.get("CRM_TRACKING_SECRET", "")
 CRM_TENANT_SLUG = os.environ.get("CRM_TENANT_SLUG", "xau-machine")
+# Chat ID riservato nel controllo CRM: rappresenta l'interruttore generale,
+# senza sovrascrivere le pause impostate nei singoli Topic.
+GLOBAL_AI_CONTROL_CHAT_ID = 0
 # Le risposte dirette ai clienti sono abilitate separatamente dai follow-up:
 # riattivare il bot non deve riavviare campagne o solleciti automatici.
 CUSTOMER_AUTO_REPLY_ENABLED = os.environ.get("CUSTOMER_AUTO_REPLY_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
@@ -1248,7 +1251,7 @@ async def ai_control_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 # --- Controllo IA per chat + coda operatore CRM ---
-async def crm_ai_attiva(chat_id: int) -> bool:
+async def crm_ai_status(chat_id: int) -> bool | None:
     try:
         headers = dict(CRM_HEADERS); headers.pop("Prefer", None)
         async with httpx.AsyncClient(timeout=8) as client:
@@ -1258,7 +1261,19 @@ async def crm_ai_attiva(chat_id: int) -> bool:
         if r.status_code < 300:
             return bool(r.json())
     except Exception as exc:
-        log.warning("Controllo stato IA non riuscito, IA resta attiva: %s", exc)
+        log.warning("Controllo stato IA non riuscito: %s", exc)
+    return None
+
+
+async def crm_ai_attiva(chat_id: int) -> bool:
+    # Il comando generale del bot amministratore blocca tutte le nuove risposte
+    # ma lascia intatti i pulsanti /stop e /toggle_auto_reply di ogni Topic.
+    general_enabled = await crm_ai_status(GLOBAL_AI_CONTROL_CHAT_ID)
+    if general_enabled is False:
+        return False
+    customer_enabled = await crm_ai_status(chat_id)
+    if customer_enabled is not None:
+        return customer_enabled
     return True
 
 async def ensure_outbox_topic(app, row: dict) -> int | None:
