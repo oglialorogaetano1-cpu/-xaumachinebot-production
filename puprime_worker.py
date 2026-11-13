@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import uuid
 from datetime import date, datetime, timedelta, timezone
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
@@ -166,10 +167,20 @@ def normalize_official_api(account_rows, commission_rows, allocation_rows):
             row["rebate"] = safe_number(item.get("commission"))
             row["rebate_aggiornato"] = date.today().isoformat()
 
-    # Allocation records are intentionally not converted into deposits.  They
-    # are retained as a count for health reporting only because the official
-    # contract does not provide a verified deposit amount.
-    return list(rows.values()), len(allocation_rows)
+    # Allocation records are intentionally not converted into deposits.  The
+    # CRM receives them as allocation movements and labels them accordingly.
+    allocations = []
+    for item in allocation_rows:
+        allocations.append(
+            {
+                "account": str(item.get("account") or "").strip(),
+                "user_id": str(item.get("userId") or "").strip(),
+                "create_time": str(item.get("createTime") or "").strip(),
+                "type": str(item.get("type") or "").strip(),
+                "content": str(item.get("content") or item.get("details") or "").strip(),
+            }
+        )
+    return list(rows.values()), allocations
 
 
 async def api_once():
@@ -206,18 +217,25 @@ async def api_once():
             commission_rows = await puprime_api_request(
                 session, "/api/ibData/commissionData", start_time, end_time
             )
-    rows, allocation_count = normalize_official_api(
+    rows, allocations = normalize_official_api(
         account_rows, commission_rows, allocation_rows
     )
     event(
         "PU_OFFICIAL_API",
         accounts=len(account_rows),
         leads=len(lead_rows),
-        allocations=allocation_count,
+        allocations=len(allocations),
         commissions=len(commission_rows),
         stored_accounts=len(rows),
     )
-    return rows
+    return {
+        "accounts": rows,
+        "allocations": allocations,
+        # Keep only structured, documented fields. Leads are not joined to a
+        # Telegram client until CRM has another verified identifier.
+        "leads": lead_rows,
+        "commissions": commission_rows,
+    }
 
 
 async def click_visible_text(page, labels):
@@ -454,6 +472,54 @@ async def upsert_rows(rows):
     return updated
 
 
+async def sync_official_api(snapshot):
+    """Persist official PU Prime data through the verified CRM RPC.
+
+    This endpoint is deliberately separate from the old portal-scraping RPC:
+    it does not accept or fabricate deposits, withdrawals, balances, or
+    copy-trading subscriptions.
+    """
+    payload = {
+        "run_id": str(uuid.uuid4()),
+        "started_at": now_iso(),
+        "accounts": snapshot["accounts"],
+        "allocations": snapshot["allocations"],
+        "leads": snapshot["leads"],
+        "commissions": snapshot["commissions"],
+    }
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Content-Type": "application/json",
+    }
+    if SUPABASE_KEY.startswith("eyJ"):
+        headers["Authorization"] = "Bearer " + SUPABASE_KEY
+    async with ClientSession(timeout=ClientTimeout(total=45)) as session:
+        url = SUPABASE_URL + "/rest/v1/rpc/crm_sync_puprime_official_api"
+        async with session.post(
+            url,
+            headers=headers,
+            json={"p_secret": SUPABASE_WORKER_SECRET, "p_payload": payload},
+        ) as response:
+            body = await response.text()
+            if response.status not in (200, 201):
+                raise RuntimeError(
+                    "Supabase official sync HTTP "
+                    + str(response.status)
+                    + ": "
+                    + body[:160]
+                )
+    result = json.loads(body) if body else {}
+    if not isinstance(result, dict) or result.get("status") != "success":
+        raise RuntimeError("CRM did not acknowledge official PU Prime sync")
+    event(
+        "SUPABASE_OFFICIAL_SYNC",
+        accounts=result.get("accounts", 0),
+        events=result.get("events", 0),
+        bootstrap=bool(result.get("bootstrap")),
+    )
+    return result
+
+
 async def scrape_once():
     required = {
         "SUPABASE_URL": SUPABASE_URL,
@@ -661,7 +727,8 @@ async def run_sync():
             month_end=date.today().isoformat(),
         )
         try:
-            rows = await api_once()
+            snapshot = await api_once()
+            rows = snapshot["accounts"]
             state["rows_by_ib"] = {PU_API_AFFILIATE_ID or "ib": len(rows)}
             if not rows:
                 # A valid empty result is permitted by the official API. Do
@@ -671,11 +738,8 @@ async def run_sync():
                 state["last_finished"] = now_iso()
                 event("PU_SYNC_SUCCESS", updated=0, accounts=0)
                 return
-            updated = await upsert_rows(rows)
-            if updated <= 0:
-                raise RuntimeError(
-                    "official account rows were captured but CRM did not acknowledge persistence"
-                )
+            result = await sync_official_api(snapshot)
+            updated = int(result.get("accounts", 0))
             state["last_status"] = "success"
             state["last_updated"] = updated
             state["last_finished"] = now_iso()
