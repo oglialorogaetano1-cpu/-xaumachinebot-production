@@ -42,9 +42,9 @@ AI_TRADER_GUIDE_IT_URL = os.environ.get(
     "https://ai-trader-mt5-checkout.vercel.app/guides/AI_Trader_MT5_Guida_Installazione_IT.pdf",
 ).strip()
 GOOGLE_TRANSLATE_API_KEY = os.environ.get("GOOGLE_TRANSLATE_API_KEY", "").strip()
-# L'AI parte volutamente spenta a ogni avvio: l'amministratore la abilita
-# esplicitamente dal proprio Telegram con /ai_accendi e la blocca con /ai_spegni.
-AI_AUTOREPLY_ENABLED = False
+# L'AI è attiva per le nuove conversazioni; l'amministratore può fermarla in
+# ogni momento con /ai_spegni. Le pause individuali dei Topic restano valide.
+AI_AUTOREPLY_ENABLED = True
 # Modalita' operatore: nessun flusso automatico verso i clienti. Il bot resta
 # connesso per archiviare i messaggi nei Topic e tradurli per lo staff.
 AUTOMATED_FLOWS_ENABLED = False
@@ -246,10 +246,10 @@ essere una persona e non fare affermazioni sulla tua identità se non te lo
 chiedono direttamente.
 Non chiedere al cliente di usare comandi: i comandi sono riservati all'amministratore.
 Segui il prompt commerciale del CRM e usa lo storico della conversazione.
-Non proporre spontaneamente storico, screenshot, accesso Investor/MT5 o un
-periodo di quattro mesi. Mostra dati o immagini soltanto se il cliente li
-chiede esplicitamente; se chiede uno storico senza periodo, domanda quale
-periodo preferisce senza suggerire quattro mesi.
+Non proporre spontaneamente storico, screenshot o accesso Investor/MT5, né
+suggerire periodi di uno, due o quattro mesi. Mostra dati o immagini soltanto
+se il cliente li chiede esplicitamente; se chiede uno storico senza periodo,
+domanda soltanto quale periodo desidera, senza esempi o suggerimenti.
 Non inventare verifiche IB, depositi, risultati, saldi o rendimenti e non promettere guadagni.
 Non aggiungere automaticamente disclaimer sul rischio, avvertenze generiche sul trading o
 promemoria sullo stop loss. Parlane soltanto se il cliente chiede esplicitamente informazioni
@@ -1664,7 +1664,7 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     periodo = None if richiesta_composta else rileva_richiesta_screenshot(testo)
     if periodo == PERIODO_DA_CHIEDERE:
         context.user_data["awaiting_mt5_period"] = True
-        domanda = "Certo 📊 Ti interessa l'andamento di oggi, dell'ultima settimana o dell'ultimo mese?"
+        domanda = "Certo 📊 Quale periodo desideri vedere?"
         await record_message(update, "in", testo, "lead")
         await msg.reply_text(domanda)
         await record_message(update, "out", domanda, "ai")
