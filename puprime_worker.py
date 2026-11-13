@@ -1,8 +1,9 @@
 import asyncio
 import json
 import os
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo
 
 from aiohttp import ClientSession, ClientTimeout, web
 from playwright.async_api import (
@@ -21,6 +22,14 @@ LOGIN_URL = os.environ.get(
 )
 IBS = ["23215978", "23217421", "7527073"]
 INTERVAL = int(os.environ.get("SYNC_INTERVAL_SECONDS", "1800"))
+PU_API_BASE_URL = os.environ.get("PU_API_BASE_URL", "https://openapi.puprime.com").rstrip("/")
+PU_API_USER_ID = os.environ.get("PU_API_USER_ID", "").strip()
+PU_API_SECRET = os.environ.get("PU_API_SECRET", "").strip()
+PU_API_LOOKBACK_DAYS = max(1, min(int(os.environ.get("PU_API_LOOKBACK_DAYS", "90")), 90))
+# The documented API returns the downstream network for the authenticated IB.
+# Keep the IB identity explicit in the CRM record instead of inferring it from
+# a customer account number.
+PU_API_AFFILIATE_ID = os.environ.get("PU_API_AFFILIATE_ID", PU_API_USER_ID).strip()
 KNOWN_ENDPOINTS = (
     "queryRebateVolumeList",
     "queryClientReport",
@@ -85,6 +94,128 @@ def field(item, *names):
         if value is not None and str(value).strip() != "":
             return value
     return None
+
+
+def api_date(value):
+    """PU Prime accepts server-time dates formatted to seconds."""
+    return value.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def puprime_server_now():
+    """The IB API documents a GMT+2 clock that observes summer time."""
+    return datetime.now(ZoneInfo("Europe/Athens"))
+
+
+async def puprime_api_request(session, endpoint, start_time, end_time):
+    payload = {
+        "userId": int(PU_API_USER_ID),
+        "secret": PU_API_SECRET,
+        "startTime": api_date(start_time),
+        "endTime": api_date(end_time),
+    }
+    url = PU_API_BASE_URL + endpoint
+    async with session.post(url, json=payload) as response:
+        body = await response.json(content_type=None)
+    if response.status != 200 or not isinstance(body, dict) or body.get("code") != 1:
+        # API bodies can contain sensitive operational data. Keep logs useful
+        # without persisting raw responses or credentials.
+        raise RuntimeError("PU Prime API rejected " + endpoint)
+    data = body.get("data")
+    return data if isinstance(data, list) else []
+
+
+def normalize_official_api(account_rows, commission_rows, allocation_rows):
+    """Normalize only fields actually documented by PU Prime's IB API.
+
+    Deposit amounts, balances and current attribution are deliberately not
+    inferred: the official API documentation says those are not available or
+    not authoritative.  A client account present in accountData is still a
+    useful verified historical account record under the authenticated IB.
+    """
+    rows = {}
+    for item in account_rows:
+        account = str(item.get("account") or "").strip()
+        if not account:
+            continue
+        rows[account] = {
+            "numero_conto": account,
+            "id_utente": str(item.get("userId") or "").strip(),
+            "affiliate_id": PU_API_AFFILIATE_ID,
+            "piattaforma": str(item.get("platform") or "").strip(),
+            "valuta_base": str(item.get("currency") or "").strip(),
+            "tipo_conto": str(item.get("accountType") or "").strip(),
+            "attivo": True,
+        }
+    for item in commission_rows:
+        account = str(item.get("account") or "").strip()
+        if not account:
+            continue
+        row = rows.setdefault(account, {
+            "numero_conto": account,
+            "affiliate_id": PU_API_AFFILIATE_ID,
+            "attivo": True,
+        })
+        for source, target in (("userId", "id_utente"), ("platform", "piattaforma"),
+                               ("currency", "valuta_base"), ("accountType", "tipo_conto")):
+            value = str(item.get(source) or "").strip()
+            if value:
+                row[target] = value
+        if item.get("commission") is not None:
+            row["rebate"] = safe_number(item.get("commission"))
+            row["rebate_aggiornato"] = date.today().isoformat()
+
+    # Allocation records are intentionally not converted into deposits.  They
+    # are retained as a count for health reporting only because the official
+    # contract does not provide a verified deposit amount.
+    return list(rows.values()), len(allocation_rows)
+
+
+async def api_once():
+    required = {
+        "SUPABASE_URL": SUPABASE_URL,
+        "SUPABASE_ANON_KEY": SUPABASE_KEY,
+        "SUPABASE_WORKER_SECRET": SUPABASE_WORKER_SECRET,
+        "PU_API_USER_ID": PU_API_USER_ID,
+        "PU_API_SECRET": PU_API_SECRET,
+    }
+    missing = sorted(name for name, value in required.items() if not value)
+    if missing:
+        raise RuntimeError("missing required API worker settings: " + ",".join(missing))
+
+    end_time = puprime_server_now().replace(microsecond=0)
+    start_time = end_time - timedelta(days=PU_API_LOOKBACK_DAYS)
+    timeout = ClientTimeout(total=50)
+    async with ClientSession(timeout=timeout) as session:
+        account_rows = await puprime_api_request(
+            session, "/api/ibData/accountData", start_time, end_time
+        )
+        allocation_rows = await puprime_api_request(
+            session, "/api/ibData/allocationData", start_time, end_time
+        )
+        # Leads have no trading-account identifier, so they cannot safely be
+        # joined to a Telegram customer until the CRM has another verified key.
+        lead_rows = await puprime_api_request(
+            session, "/api/ibData/leadsData", start_time, end_time
+        )
+        commission_rows = []
+        # The documented commission endpoint may only run from 00:00 to 06:00
+        # PU Prime server time and at most once per five minutes.
+        if 0 <= end_time.hour < 6:
+            commission_rows = await puprime_api_request(
+                session, "/api/ibData/commissionData", start_time, end_time
+            )
+    rows, allocation_count = normalize_official_api(
+        account_rows, commission_rows, allocation_rows
+    )
+    event(
+        "PU_OFFICIAL_API",
+        accounts=len(account_rows),
+        leads=len(lead_rows),
+        allocations=allocation_count,
+        commissions=len(commission_rows),
+        stored_accounts=len(rows),
+    )
+    return rows
 
 
 async def click_visible_text(page, labels):
@@ -239,6 +370,16 @@ async def upsert_rows(rows):
         ).strip()
 
         current = merged.setdefault(account, {"numero_conto": account})
+        for source, target in (
+            ("id_utente", "id_utente"),
+            ("affiliate_id", "affiliate_id"),
+            ("piattaforma", "piattaforma"),
+            ("valuta_base", "valuta_base"),
+            ("tipo_conto", "tipo_conto"),
+        ):
+            value = str(item.get(source) or "").strip()
+            if value:
+                current[target] = value[:200]
         if name:
             current["nome"] = name[:200]
         if rebate > 0:
@@ -255,7 +396,7 @@ async def upsert_rows(rows):
     for row in merged.values():
         if any(
             key in row
-            for key in ("rebate", "saldo", "ultimo_deposito_importo")
+            for key in ("rebate", "saldo", "ultimo_deposito_importo", "id_utente")
         ):
             row["attivo"] = True
             safe_rows.append(row)
@@ -506,13 +647,16 @@ async def run_sync():
             month_end=date.today().isoformat(),
         )
         try:
-            buckets, rows = await scrape_once()
-            rows_by_ib = {ib: len(buckets[ib]) for ib in IBS}
-            state["rows_by_ib"] = rows_by_ib
+            rows = await api_once()
+            state["rows_by_ib"] = {PU_API_AFFILIATE_ID or "ib": len(rows)}
             if not rows:
-                raise RuntimeError(
-                    "zero real rows from every IB; database preserved"
-                )
+                # A valid empty result is permitted by the official API. Do
+                # not overwrite CRM records or report a false success update.
+                state["last_status"] = "success"
+                state["last_updated"] = 0
+                state["last_finished"] = now_iso()
+                event("PU_SYNC_SUCCESS", updated=0, accounts=0)
+                return
             updated = await upsert_rows(rows)
             if updated <= 0:
                 raise RuntimeError(
@@ -524,8 +668,8 @@ async def run_sync():
             event(
                 "PU_SYNC_SUCCESS",
                 updated=updated,
-                ibs_with_rows=sum(1 for value in rows_by_ib.values() if value > 0),
-                rows_by_ib=rows_by_ib,
+                accounts=len(rows),
+                ib_user_id=PU_API_AFFILIATE_ID,
             )
         except Exception as error:
             state["last_status"] = "failed"
