@@ -5,7 +5,9 @@
 
 alter table public.crm_puprime_events
   add column if not exists source_key text,
-  add column if not exists notified_at timestamptz;
+  add column if not exists notified_at timestamptz,
+  add column if not exists notification_claim_id uuid,
+  add column if not exists notification_claimed_at timestamptz;
 
 create unique index if not exists crm_puprime_events_tenant_source_key_uidx
   on public.crm_puprime_events (tenant_id, source_key)

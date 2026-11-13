@@ -1981,6 +1981,93 @@ async def poll_signal_room_expirations(app: Application) -> None:
         await asyncio.sleep(300)
 
 
+def format_puprime_event(event: dict) -> str | None:
+    """Render only verified CRM/official-API events for the private admin chat."""
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    account = str(payload.get("account") or "").strip()
+    masked_account = ("••••" + account[-4:]) if len(account) >= 4 else "non disponibile"
+    event_type = str(event.get("event_type") or "")
+    customer = str(payload.get("customer_name") or event.get("id_utente") or "Cliente non associato")
+    if event_type == "account_opened":
+        details = " · ".join(filter(None, [
+            str(payload.get("platform") or "").strip(),
+            str(payload.get("currency") or "").strip(),
+            str(payload.get("account_type") or "").strip(),
+        ]))
+        return (
+            "✅ Nuovo conto PU Prime registrato\n"
+            f"Cliente: {customer}\nConto: {masked_account}"
+            + (f"\n{details}" if details else "")
+        )
+    if event_type in ("allocation_in", "allocation_out"):
+        direction = "entrata" if event_type == "allocation_in" else "uscita"
+        return (
+            f"🔄 Movimento allocazione PU Prime ({direction})\n"
+            f"Cliente: {customer}\nConto: {masked_account}\n"
+            "Nota: l’API non certifica deposito/prelievo o importo."
+        )
+    if event_type == "copy_activated":
+        amount = payload.get("amount")
+        currency = str(payload.get("currency") or "USD").strip()
+        amount_line = f"\nImporto verificato nel CRM: {amount} {currency}" if amount is not None else ""
+        return (
+            f"🤖 Copy trading attivato\nCliente: {customer}\n"
+            f"Strategia: {payload.get('strategy_name') or 'NEXORA AI'}"
+            + amount_line
+        )
+    return None
+
+
+async def poll_puprime_notifications(app: Application) -> None:
+    """Deliver new verified PU Prime/CRM events privately to the administrator.
+
+    A row is marked delivered only after Telegram accepted the notification.
+    No financial amounts are inferred from allocation events.
+    """
+    if not ADMIN_CHAT_ID:
+        log.warning("Notifiche PU Prime non attive: ADMIN_CHAT_ID mancante")
+        return
+    event_types = "account_opened,allocation_in,allocation_out,copy_activated"
+    while True:
+        try:
+            headers = dict(CRM_HEADERS)
+            headers.pop("Prefer", None)
+            params = {
+                "tenant_id": "eq.00000000-0000-4000-8000-000000000001",
+                "notified_at": "is.null",
+                "event_type": f"in.({event_types})",
+                "order": "created_at.asc",
+                "limit": "25",
+                "select": "id,event_type,id_utente,payload,created_at",
+            }
+            async with httpx.AsyncClient(timeout=15) as client:
+                response = await client.get(
+                    f"{SUPABASE_URL}/rest/v1/crm_puprime_events",
+                    headers=headers,
+                    params=params,
+                )
+                response.raise_for_status()
+                events = response.json() or []
+                for item in events:
+                    message = format_puprime_event(item)
+                    if not message:
+                        continue
+                    await app.bot.send_message(chat_id=int(ADMIN_CHAT_ID), text=message)
+                    marked = await client.patch(
+                        f"{SUPABASE_URL}/rest/v1/crm_puprime_events",
+                        headers={**headers, "Prefer": "return=minimal"},
+                        params={"id": f"eq.{item['id']}"},
+                        json={"notified_at": datetime.now(timezone.utc).isoformat()},
+                    )
+                    marked.raise_for_status()
+                    log.info("Notifica PU Prime consegnata: %s", item.get("event_type"))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.warning("Polling notifiche PU Prime non disponibile: %s", exc)
+        await asyncio.sleep(60)
+
+
 async def channel_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Accoglie, traccia e approva le richieste dei link configurati."""
     request = update.chat_join_request
@@ -2115,6 +2202,7 @@ async def post_init(app):
     log.info("Telegram support Forum configured: %s", bool(support_forum_chat_id()))
     app.create_task(poll_operator_outbox(app), name="crm-operator-outbox")
     app.create_task(poll_signal_room_expirations(app), name="signal-room-24h-enforcement")
+    app.create_task(poll_puprime_notifications(app), name="puprime-admin-notifications")
     log.info("Signal room 24h enforcement enabled for %s", SIGNAL_ROOM_URL)
 
 def main():
