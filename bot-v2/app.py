@@ -704,13 +704,9 @@ async def crm_topic_save(*, telegram_user_id: int, telegram_chat_id: int,
         return False
 
 
-async def crm_store_language(update: Update) -> None:
-    """Salva la lingua Telegram del cliente per le risposte manuali tradotte."""
-    user = update.effective_user
-    chat = update.effective_chat
-    if not user or not chat or chat.type != "private" or not user.language_code:
-        return
-    language = user.language_code.split("-", 1)[0].lower()
+async def crm_set_customer_language(telegram_user_id: int, language: str) -> None:
+    """Aggiorna la lingua effettiva del cliente usata per gli invii manuali."""
+    language = (language or "").split("-", 1)[0].lower()
     if not re.fullmatch(r"[a-z]{2,3}", language):
         return
     headers = dict(CRM_HEADERS)
@@ -723,7 +719,7 @@ async def crm_store_language(update: Update) -> None:
                 json={
                     "p_secret": CRM_TRACKING_SECRET,
                     "p_tenant_slug": CRM_TENANT_SLUG,
-                    "p_telegram_user_id": user.id,
+                    "p_telegram_user_id": telegram_user_id,
                     "p_language": language,
                 },
             )
@@ -731,6 +727,15 @@ async def crm_store_language(update: Update) -> None:
             log.warning("Salvataggio lingua Telegram fallito %s: %s", r.status_code, r.text[:200])
     except Exception as exc:
         log.warning("Salvataggio lingua Telegram non disponibile: %s", exc)
+
+
+async def crm_store_language(update: Update) -> None:
+    """Salva la lingua del profilo come primo valore, poi corretta dal testo reale."""
+    user = update.effective_user
+    chat = update.effective_chat
+    if not user or not chat or chat.type != "private" or not user.language_code:
+        return
+    await crm_set_customer_language(user.id, user.language_code)
 
 
 async def crm_set_ai_control(chat_id: int, mode: str) -> dict:
@@ -764,24 +769,28 @@ async def google_translate_from_italian(text: str, target_language: str) -> tupl
     target = (target_language or "it").split("-", 1)[0].lower()
     if target in ("", "it") or not GOOGLE_TRANSLATE_API_KEY:
         return text, target in ("", "it")
-    try:
-        async with httpx.AsyncClient(timeout=12) as client:
-            r = await client.post(
-                "https://translation.googleapis.com/language/translate/v2",
-                params={"key": GOOGLE_TRANSLATE_API_KEY},
-                json={"q": text, "source": "it", "target": target, "format": "text"},
-            )
-        if r.status_code >= 300:
-            log.warning("Google Translate fallito %s: %s", r.status_code, r.text[:200])
-            return text, False
-        translated = (((r.json().get("data") or {}).get("translations") or [{}])[0].get("translatedText") or "").strip()
-        return (translated or text), bool(translated)
-    except Exception as exc:
-        log.warning("Google Translate non disponibile: %s", exc)
+    for attempt in range(2):
+        try:
+            async with httpx.AsyncClient(timeout=12) as client:
+                r = await client.post(
+                    "https://translation.googleapis.com/language/translate/v2",
+                    params={"key": GOOGLE_TRANSLATE_API_KEY},
+                    json={"q": text, "source": "it", "target": target, "format": "text"},
+                )
+            if r.status_code < 300:
+                translated = (((r.json().get("data") or {}).get("translations") or [{}])[0].get("translatedText") or "").strip()
+                if translated:
+                    return translated, True
+            else:
+                log.warning("Google Translate fallito tentativo %s: %s", attempt + 1, r.status_code)
+        except Exception as exc:
+            log.warning("Google Translate non disponibile tentativo %s: %s", attempt + 1, exc)
+        if attempt == 0:
+            await asyncio.sleep(0.4)
         return text, False
 
 
-async def google_translate_to_italian(text: str, declared_language: str) -> tuple[str, bool]:
+async def google_translate_to_italian(text: str, declared_language: str) -> tuple[str, bool, str]:
     """Traduzione interna per lo staff con rilevamento automatico Google.
 
     La lingua impostata nel profilo Telegram non e' affidabile: un cliente puo'
@@ -792,7 +801,7 @@ async def google_translate_to_italian(text: str, declared_language: str) -> tupl
     """
     language = (declared_language or "").split("-", 1)[0].lower()
     if not text:
-        return "", False
+        return "", False, ""
     if GOOGLE_TRANSLATE_API_KEY:
         try:
             async with httpx.AsyncClient(timeout=12) as client:
@@ -809,8 +818,8 @@ async def google_translate_to_italian(text: str, declared_language: str) -> tupl
                 # responses.  In that case the CRM language is a safer
                 # fallback than silently dropping an English/French message.
                 if translated and (source != "it" or (not source and language not in ("", "it"))):
-                    return translated, True
-                return "", False
+                    return translated, True, source
+                return "", False, source
             log.warning("Traduzione italiana Google fallita %s: %s", response.status_code, response.text[:200])
         except Exception as exc:
             log.warning("Traduzione italiana Google non disponibile: %s", exc)
@@ -818,7 +827,7 @@ async def google_translate_to_italian(text: str, declared_language: str) -> tupl
     # Never use the commercial assistant as a translation fallback: a failed
     # translation must remain visibly unavailable, not turn into a generic
     # sales answer that looks like an Italian translation in the Topic.
-    return "", False
+    return "", False, ""
 
 
 async def ensure_customer_topic(update: Update) -> int | None:
@@ -887,7 +896,11 @@ async def mirror_text_to_forum(update: Update, direction: str, body: str,
     if inbound or sender_type == "ai":
         source_body = body[:1800]
         language = str(getattr(update.effective_user, "language_code", "") or "")
-        italian, translated = await google_translate_to_italian(source_body, language)
+        italian, translated, detected_language = await google_translate_to_italian(source_body, language)
+        # La lingua del messaggio reale prevale sul language_code del profilo,
+        # che Telegram lascia spesso impostato in italiano anche per clienti esteri.
+        if inbound and detected_language and detected_language != "it" and update.effective_user:
+            await crm_set_customer_language(update.effective_user.id, detected_language)
         if translated:
             topic_body = f"{source_body}\n\n🇮🇹 Traduzione italiana\n{italian[:1800]}"
     try:
@@ -963,16 +976,26 @@ async def forum_operator_message(update: Update, context: ContextTypes.DEFAULT_T
             )
             target_language = str(mapping.get("language") or "it").split("-", 1)[0].lower()
             if target_language not in ("", "it") and not translated:
-                await msg.reply_text(
-                    "⚠️ Traduzione non disponibile: il messaggio non è stato inviato al cliente."
+                # La consegna dell'operatore non deve andare persa.  L'errore
+                # viene registrato e Google viene ritentato, ma se il provider
+                # resta indisponibile consegniamo comunque il testo originale.
+                log.warning("Traduzione operatore non riuscita; invio originale al cliente %s", mapping["telegram_chat_id"])
+            try:
+                await context.bot.send_message(
+                    chat_id=int(mapping["telegram_chat_id"]),
+                    text=body,
+                    disable_web_page_preview=True,
+                    business_connection_id=mapping.get("business_connection_id"),
                 )
-                return
-            await context.bot.send_message(
-                chat_id=int(mapping["telegram_chat_id"]),
-                text=body,
-                disable_web_page_preview=True,
-                business_connection_id=mapping.get("business_connection_id"),
-            )
+            except Exception as business_error:
+                # A stale Business connection must not prevent an operator
+                # message from reaching a customer who has started the bot.
+                log.warning("Invio Business Topic fallito, provo chat diretta: %s", business_error)
+                await context.bot.send_message(
+                    chat_id=int(mapping["telegram_chat_id"]),
+                    text=body,
+                    disable_web_page_preview=True,
+                )
         else:
             business_connection_id = mapping.get("business_connection_id")
             if business_connection_id and msg.photo:
