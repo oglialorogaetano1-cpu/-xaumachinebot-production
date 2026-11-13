@@ -1438,6 +1438,22 @@ def _estrai_risposta_cliente(testo_ai: str) -> tuple[str, dict]:
     interni e non devono mai comparire nella chat Telegram.
     """
     raw = (testo_ai or "").strip()
+    # Alcuni prompt storici restituiscono prima una risposta leggibile e poi
+    # un blocco JSON tecnico. In quel caso il cliente deve ricevere soltanto
+    # la parte iniziale; i metadati restano disponibili internamente.
+    coda_json = re.search(
+        r"(?:\n|\r\n)*```(?:json)?\s*(\{[\s\S]*\})\s*```\s*$",
+        raw,
+        flags=re.IGNORECASE,
+    )
+    if coda_json:
+        try:
+            metadati = json.loads(coda_json.group(1))
+        except json.JSONDecodeError:
+            metadati = {}
+        testo_cliente = raw[:coda_json.start()].strip()
+        if testo_cliente:
+            return testo_cliente, metadati if isinstance(metadati, dict) else {}
     candidato = raw
     if candidato.startswith("```"):
         righe = candidato.splitlines()
