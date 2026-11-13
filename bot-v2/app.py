@@ -80,6 +80,9 @@ ALICE_WELCOME_MESSAGE = (
     "e ti guidiamo nel passaggio successivo. Se hai già un conto PU Prime, scrivimi prima "
     "di procedere così ti indichiamo il cambio IB corretto."
 )
+
+ULTIMA_MARKETS_REGISTRATION_URL = "https://ultgo.com/la-com/ENGLISH/wAtei0nf"
+ULTIMA_MARKETS_IB_CODE = "24903947"
 CHANNEL_JOIN_CAMPAIGNS = {
     SIGNAL_ROOM_URL: {
         "source": SIGNAL_ROOM_SOURCE,
@@ -259,6 +262,14 @@ nomi di funzioni, termini da programmatore, riferimenti a prompt, AI, strumenti,
 policy, traduzioni, log, dati mancanti o istruzioni interne. Non proporre storico,
 MT5, Investor, screenshot o periodi di risultati. Non fingere di essere una persona
 e non inventare dati o conferme."""
+
+BROKER_ROUTING_RULES = f"""GESTIONE BROKER E BONUS:
+- Prima di proporre un broker, chiedi se il cliente possiede gia' un conto PU Prime o Ultima Markets, a meno che lo abbia gia' detto.
+- Se il cliente e' gia' su PU Prime e vuole sfruttare una promozione da nuovo cliente, proponi di verificare l'idoneita' a Ultima Markets. Il link ufficiale e' {ULTIMA_MARKETS_REGISTRATION_URL}; il codice IB e' {ULTIMA_MARKETS_IB_CODE}.
+- La promozione Ultima Markets comunicata dall'amministratore e' fino al 150% del primo deposito, con tetto massimo di 1.500 euro. Specifica sempre che e' soggetta a idoneita', termini e attivazione presso il broker prima del deposito.
+- Se il cliente e' gia' su Ultima Markets, valuta con lui PU Prime come alternativa, senza inventare percentuali di bonus PU Prime.
+- Non dire mai che il cliente guadagnera' il doppio o che il bonus produce profitti: il bonus aumenta il capitale operativo secondo le condizioni del broker, ma il trading comporta rischio di perdita.
+- Mantieni la risposta breve; dai il link solo quando il cliente conferma di voler procedere con Ultima Markets."""
 
 PU_PRIME_NOT_FOUND = (
     "Al momento non ti trovo dentro iscritto con noi su PU Prime, sei sicuro? "
@@ -1469,6 +1480,7 @@ async def genera_risposta_ai(testo: str, contesto: dict) -> tuple[str, dict]:
     instructions += "\n\n" + puprime_prompt_context(contesto.get("puprime") or {})
     if prompt_crm:
         instructions += "\n\nPROMPT COMMERCIALE ATTIVO DAL CRM:\n" + prompt_crm
+    instructions += "\n\n" + BROKER_ROUTING_RULES
     instructions += "\n\n" + CUSTOMER_OUTPUT_GUARDRAIL
     history = contesto.get("history") or []
     input_items = []
