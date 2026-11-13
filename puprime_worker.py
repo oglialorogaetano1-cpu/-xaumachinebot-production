@@ -340,6 +340,7 @@ async def upsert_rows(rows):
                 "loginId",
                 "uid",
                 "account",
+                "numero_conto",
                 "mtAccount",
             )
             or ""
