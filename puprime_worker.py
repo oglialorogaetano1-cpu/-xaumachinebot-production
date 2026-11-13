@@ -29,7 +29,9 @@ PU_API_LOOKBACK_DAYS = max(1, min(int(os.environ.get("PU_API_LOOKBACK_DAYS", "90
 # The documented API returns the downstream network for the authenticated IB.
 # Keep the IB identity explicit in the CRM record instead of inferring it from
 # a customer account number.
-PU_API_AFFILIATE_ID = os.environ.get("PU_API_AFFILIATE_ID", PU_API_USER_ID).strip()
+# Railway may preserve an old variable as an empty string.  Treat that exactly
+# like an unset value so authenticated account rows retain their IB identity.
+PU_API_AFFILIATE_ID = os.environ.get("PU_API_AFFILIATE_ID", "").strip() or PU_API_USER_ID
 KNOWN_ENDPOINTS = (
     "queryRebateVolumeList",
     "queryClientReport",
