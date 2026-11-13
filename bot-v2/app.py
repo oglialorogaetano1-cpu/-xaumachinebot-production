@@ -45,6 +45,7 @@ GOOGLE_TRANSLATE_API_KEY = os.environ.get("GOOGLE_TRANSLATE_API_KEY", "").strip(
 # L'AI è attiva per le nuove conversazioni; l'amministratore può fermarla in
 # ogni momento con /ai_spegni. Le pause individuali dei Topic restano valide.
 AI_AUTOREPLY_ENABLED = True
+MT5_SHOWCASE_ENABLED = False
 # Modalita' operatore: nessun flusso automatico verso i clienti. Il bot resta
 # connesso per archiviare i messaggi nei Topic e tradurli per lo staff.
 AUTOMATED_FLOWS_ENABLED = False
@@ -246,10 +247,9 @@ essere una persona e non fare affermazioni sulla tua identità se non te lo
 chiedono direttamente.
 Non chiedere al cliente di usare comandi: i comandi sono riservati all'amministratore.
 Segui il prompt commerciale del CRM e usa lo storico della conversazione.
-Non proporre spontaneamente storico, screenshot o accesso Investor/MT5, né
-suggerire periodi di uno, due o quattro mesi. Mostra dati o immagini soltanto
-se il cliente li chiede esplicitamente; se chiede uno storico senza periodo,
-domanda soltanto quale periodo desidera, senza esempi o suggerimenti.
+Non proporre, suggerire o inviare storico, screenshot, accesso Investor/MT5 o
+periodi di performance. Mantieni la conversazione sull'iscrizione, sulla
+configurazione corretta del conto e sul prossimo passaggio richiesto dal cliente.
 Non inventare verifiche IB, depositi, risultati, saldi o rendimenti e non promettere guadagni.
 Non aggiungere automaticamente disclaimer sul rischio, avvertenze generiche sul trading o
 promemoria sullo stop loss. Parlane soltanto se il cliente chiede esplicitamente informazioni
@@ -265,7 +265,7 @@ PU_PRIME_NOT_FOUND = (
     "Hai scritto bene nome e cognome?"
 )
 
-DEFAULT_WELCOME_MESSAGE = "Ciao 👋 Benvenuto in XAU Machine! 🚀\n\nSe hai già le idee chiare e vuoi unirti a noi, ecco il percorso rapido 👇\n\n🆕 DEVI ANCORA REGISTRARTI?\n\n🔗 Registrati su PU Prime da questo link:\nhttps://puvip.co/la-partners/Pvzi1lQC\n\n• Lascia vuoto “Codice di riferimento”\n• Completa la verifica del documento\n• Inviami Nome e Cognome per controllare il collegamento ✅\n\n⚠️ Non depositare ancora: aspetta la mia conferma e la guida per aprire il conto corretto:\n\n• Copy Popular Trading\n• Standard\n• Valuta EUR\n• Nessun voucher\n\n♻️ HAI GIÀ PU PRIME?\n\nScrivimi prima di procedere. Ti guiderò nel trasferimento utilizzando il codice IB:\n\n👉 23217421\n\n📊 SALA SEGNALI — MANUALE\n\nAccesso gratuito per sole 24 ore dal primo ingresso. I segnali vengono pubblicati manualmente nella sala: non è un bot automatico e non copia le operazioni da solo 👇\n\nhttps://t.me/+-e1_tDFps0Q2YmE0\n\n🤖 BOT / COPY TRADING — AUTOMATICO\n\nIl bot è completamente automatico: una volta configurato sul conto corretto, esegue il copy trading in autonomia.\n\nSe vuoi iniziare subito, scrivimi cosa hai già fatto. Se invece vuoi conoscere risultati, rischi, differenze tra bot e sala segnali o capire come funziona tutto, chiedimi pure liberamente 😊"
+DEFAULT_WELCOME_MESSAGE = "Ciao 👋 Benvenuto in XAU Machine!\n\nPer iniziare: registrati su PU Prime dal link ufficiale, completa la verifica del documento e scrivimi nome e cognome. Ti guiderò poi nell'apertura del conto corretto: Copy Popular Trading, Standard, valuta EUR e nessun voucher.\n\nHai già PU Prime? Scrivimi prima di procedere: ti guido nel trasferimento IB."
 
 # ---------------------------------------------------------- richieste MT5
 # Parole/frasi che fanno riconoscere una richiesta di vedere l'andamento
@@ -1637,7 +1637,7 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text(risposta)
         await record_message(update, "out", risposta, "ai")
         return
-    if not richiesta_composta and chiede_credenziali_investor_mt5(testo):
+    if MT5_SHOWCASE_ENABLED and not richiesta_composta and chiede_credenziali_investor_mt5(testo):
         risposta_credenziali = testo_credenziali_investor_mt5()
         await record_message(update, "in", testo, "lead")
         if risposta_credenziali:
@@ -1656,12 +1656,12 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text(risposta_errore)
             await record_message(update, "out", risposta_errore, "ai")
         return
-    if context.user_data.pop("awaiting_mt5_period", False):
+    if MT5_SHOWCASE_ENABLED and context.user_data.pop("awaiting_mt5_period", False):
         periodo_risposta = estrai_periodo_mt5(testo)
         if periodo_risposta:
             await richiedi_screenshot_mt5(update, context, periodo_risposta, testo)
             return
-    periodo = None if richiesta_composta else rileva_richiesta_screenshot(testo)
+    periodo = None if (richiesta_composta or not MT5_SHOWCASE_ENABLED) else rileva_richiesta_screenshot(testo)
     if periodo == PERIODO_DA_CHIEDERE:
         context.user_data["awaiting_mt5_period"] = True
         domanda = "Certo 📊 Quale periodo desideri vedere?"
