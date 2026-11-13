@@ -261,6 +261,17 @@ Se chiedono una verifica PU Prime e non esiste una verifica reale nei dati, risp
 Non dire "verifico" se non hai un dato reale. Quando chiedono la sala segnali, fornisci sempre il link ufficiale.
 Non inventare operazioni, TP1, TP2 o risultati: riportali solo se arrivano da una fonte reale sincronizzata."""
 
+# Aggiunta dopo il prompt CRM: è l'ultima barriera contro bozze tecniche,
+# metadati e linguaggio da programmatore nel testo che arriva al cliente.
+CUSTOMER_OUTPUT_GUARDRAIL = """CONTROLLO FINALE OBBLIGATORIO:
+Scrivi esclusivamente la risposta destinata al cliente, nella sua lingua.
+Usa tono naturale, breve e chiaro: massimo due frasi, salvo una guida passo-passo
+richiesta esplicitamente. Non usare markdown, asterischi, elenchi, JSON, codice,
+nomi di funzioni, termini da programmatore, riferimenti a prompt, AI, strumenti,
+policy, traduzioni, log, dati mancanti o istruzioni interne. Non proporre storico,
+MT5, Investor, screenshot o periodi di risultati. Non fingere di essere una persona
+e non inventare dati o conferme."""
+
 PU_PRIME_NOT_FOUND = (
     "Al momento non ti trovo dentro iscritto con noi su PU Prime, sei sicuro? "
     "Hai scritto bene nome e cognome?"
@@ -1454,6 +1465,7 @@ async def genera_risposta_ai(testo: str, contesto: dict) -> tuple[str, dict]:
     instructions += "\n\n" + puprime_prompt_context(contesto.get("puprime") or {})
     if prompt_crm:
         instructions += "\n\nPROMPT COMMERCIALE ATTIVO DAL CRM:\n" + prompt_crm
+    instructions += "\n\n" + CUSTOMER_OUTPUT_GUARDRAIL
     history = contesto.get("history") or []
     input_items = []
     for item in history[-20:]:
