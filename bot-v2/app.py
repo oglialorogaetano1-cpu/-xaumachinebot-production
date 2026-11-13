@@ -74,23 +74,11 @@ LEOTRADING_WELCOME_MESSAGE = (
 ALICE_INVITE_LINK = "https://t.me/+jYBiDAXeGB40MWNk"
 ALICE_SOURCE = "tg_it_alice"
 ALICE_WELCOME_MESSAGE = (
-    "🤖 Ciao! 👋 Sono l’assistente automatico di Alice Trading. Rispondo subito, "
-    "ma sono sempre supervisionato dal nostro staff umano 😎\n\n"
-    "Siamo specializzati in bot automatici per il trading e preferiamo mostrarti qualcosa "
-    "di concreto prima di chiederti di decidere.\n\n"
-    "Puoi controllare personalmente il nostro conto reale su MetaTrader 5 tramite un accesso "
-    "Investor in sola lettura. Potrai vedere il conto, le operazioni e lo storico, senza poter "
-    "aprire, modificare o chiudere operazioni.\n\n"
-    "Scrivimi semplicemente «accesso Investor» e ti fornirò tutti i dati per controllarlo.\n\n"
-    "Se preferisci, puoi anche chiedermi uno screenshot aggiornato del bot reale oppure "
-    "l’accesso alla nostra sala segnali.\n\n"
-    "🆕 Se non hai ancora PU Prime, puoi registrarti qui:\n"
-    "https://puvip.co/la-partners/Pvzi1lQC\n\n"
-    "Dopo la registrazione, scrivimi nome e cognome: controlleremo che il conto sia "
-    "realmente collegato al nostro IB prima di attivare il bot.\n\n"
-    "♻️ Hai già un conto PU Prime? Posso guidarti nel cambio IB utilizzando il codice 23217421.\n\n"
-    "Dimmi pure da dove vuoi iniziare: hai già esperienza con bot automatici o trading, "
-    "oppure parti da zero? 😊"
+    "Ciao 👋 Per iniziare con il copy trading automatico, registrati su PU Prime "
+    "dal link del tuo referente e completa la verifica del conto.\n\n"
+    "Dopo l’iscrizione scrivimi nome e cognome: verifichiamo il collegamento al nostro IB "
+    "e ti guidiamo nel passaggio successivo. Se hai già un conto PU Prime, scrivimi prima "
+    "di procedere così ti indichiamo il cambio IB corretto."
 )
 CHANNEL_JOIN_CAMPAIGNS = {
     SIGNAL_ROOM_URL: {
