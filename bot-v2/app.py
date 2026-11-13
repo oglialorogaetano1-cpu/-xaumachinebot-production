@@ -1453,6 +1453,20 @@ def _estrai_risposta_cliente(testo_ai: str) -> tuple[str, dict]:
         testo_cliente = raw[:coda_json.start()].strip()
         if testo_cliente:
             return testo_cliente, metadati if isinstance(metadati, dict) else {}
+    # Stessa protezione quando il modello omette per errore i delimitatori
+    # Markdown e accoda direttamente l'oggetto tecnico al testo cliente.
+    coda_json_piana = re.search(r"(?:\n|\r\n)+\s*(\{[\s\S]*\})\s*$", raw)
+    if coda_json_piana:
+        try:
+            metadati = json.loads(coda_json_piana.group(1))
+        except json.JSONDecodeError:
+            metadati = {}
+        if isinstance(metadati, dict) and any(
+            key in metadati for key in ("reply_text", "intent", "next_action", "follow_up_type")
+        ):
+            testo_cliente = raw[:coda_json_piana.start()].strip()
+            if testo_cliente:
+                return testo_cliente, metadati
     candidato = raw
     if candidato.startswith("```"):
         righe = candidato.splitlines()
