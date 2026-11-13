@@ -135,6 +135,11 @@ def is_admin_chat(chat_id: int | None) -> bool:
     return bool(chat_id is not None and ADMIN_CHAT_ID and str(chat_id) == str(ADMIN_CHAT_ID).strip())
 
 
+def is_admin_user(user_id: int | None) -> bool:
+    """Only the owner may forward a Topic message to a real customer."""
+    return bool(user_id is not None and ADMIN_CHAT_ID and str(user_id) == str(ADMIN_CHAT_ID).strip())
+
+
 async def ai_global_control(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
     """Consente soltanto all'amministratore di attivare o fermare tutte le risposte AI."""
     global AI_AUTOREPLY_ENABLED
@@ -798,6 +803,50 @@ async def google_translate_from_italian(text: str, target_language: str) -> tupl
             log.warning("Google Translate non disponibile tentativo %s: %s", attempt + 1, exc)
         if attempt == 0:
             await asyncio.sleep(0.4)
+    return await ai_translate_text(text, "Italian", target)
+
+
+async def ai_translate_text(text: str, source_language: str, target_language: str) -> tuple[str, bool]:
+    """Fallback di sola traduzione, separato dal prompt commerciale clienti."""
+    source_key = (source_language or "").strip().lower()
+    target_key = (target_language or "").strip().lower()
+    if not text or not target_key:
+        return text, False
+    if source_key in (target_key, "italian") and target_key in ("it", "italian"):
+        return text, True
+    instruction = (
+        "TRANSLATION ONLY. Translate the user's text from "
+        f"{source_language} into {target_language}. Return only the faithful translation. "
+        "Do not answer the user, do not add sales text, explanation, labels, Markdown, JSON, or metadata. "
+        "Preserve URLs, numbers, names and emojis."
+    )
+    try:
+        async with httpx.AsyncClient(timeout=18) as client:
+            response = await client.post(
+                f"{SUPABASE_URL}/functions/v1/crm-ai-chat",
+                headers={
+                    "apikey": SUPABASE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "runtime_secret": CRM_TRACKING_SECRET,
+                    "tenant_slug": CRM_TENANT_SLUG,
+                    "instructions": instruction,
+                    "input": [{"role": "user", "content": text[:8000]}],
+                },
+            )
+        if response.status_code >= 300:
+            log.warning("Fallback traduzione AI fallito: %s", response.status_code)
+            return text, False
+        translated = str((response.json() or {}).get("text") or "").strip()
+        translated = re.sub(r"^```(?:text)?\s*|\s*```$", "", translated, flags=re.IGNORECASE).strip()
+        # Un fallback che restituisce metadati non e' una traduzione affidabile.
+        if not translated or "```" in translated or re.search(r'"(?:intent|reply_text|next_action)"\s*:', translated):
+            return text, False
+        return translated, True
+    except Exception as exc:
+        log.warning("Fallback traduzione AI non disponibile: %s", exc)
         return text, False
 
 
@@ -838,7 +887,8 @@ async def google_translate_to_italian(text: str, declared_language: str) -> tupl
     # Never use the commercial assistant as a translation fallback: a failed
     # translation must remain visibly unavailable, not turn into a generic
     # sales answer that looks like an Italian translation in the Topic.
-    return "", False, ""
+    italian, translated = await ai_translate_text(text, "auto-detected language", "Italian")
+    return (italian, True, language) if translated else ("", False, "")
 
 
 async def ensure_customer_topic(update: Update) -> int | None:
@@ -962,6 +1012,9 @@ async def forum_operator_message(update: Update, context: ContextTypes.DEFAULT_T
             or not msg.is_topic_message or not msg.message_thread_id
             or (update.effective_user and update.effective_user.is_bot)):
         return
+    if not is_admin_user(update.effective_user.id if update.effective_user else None):
+        log.warning("Messaggio Topic non autorizzato bloccato: utente=%s", getattr(update.effective_user, "id", None))
+        return
     mapping = await crm_topic_lookup(message_thread_id=msg.message_thread_id)
     if not mapping.get("telegram_chat_id"):
         await msg.reply_text("⚠️ Questo Topic non e' ancora collegato a un cliente.")
@@ -987,10 +1040,11 @@ async def forum_operator_message(update: Update, context: ContextTypes.DEFAULT_T
             )
             target_language = str(mapping.get("language") or "it").split("-", 1)[0].lower()
             if target_language not in ("", "it") and not translated:
-                # La consegna dell'operatore non deve andare persa.  L'errore
-                # viene registrato e Google viene ritentato, ma se il provider
-                # resta indisponibile consegniamo comunque il testo originale.
-                log.warning("Traduzione operatore non riuscita; invio originale al cliente %s", mapping["telegram_chat_id"])
+                # Mai inviare italiano a un cliente estero: Google viene
+                # ritentato e poi interviene il fallback AI di sola traduzione.
+                # Se entrambi non rispondono, il testo resta nel Topic.
+                await msg.reply_text("⚠️ Traduzione non disponibile: il messaggio resta nel Topic e non viene inviato nella lingua sbagliata.")
+                return
             try:
                 await context.bot.send_message(
                     chat_id=int(mapping["telegram_chat_id"]),
