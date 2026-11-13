@@ -394,9 +394,20 @@ async def upsert_rows(rows):
 
     safe_rows = []
     for row in merged.values():
+        # The official accountData response is a verified historical account
+        # record for this IB even when it does not include the optional
+        # downstream user id.  Persist that identity rather than discarding
+        # every account until a rebate/deposit-style numeric field appears.
+        # This must not be read as a balance, deposit or live attribution.
         if any(
             key in row
-            for key in ("rebate", "saldo", "ultimo_deposito_importo", "id_utente")
+            for key in (
+                "rebate",
+                "saldo",
+                "ultimo_deposito_importo",
+                "id_utente",
+                "affiliate_id",
+            )
         ):
             row["attivo"] = True
             safe_rows.append(row)
@@ -660,7 +671,7 @@ async def run_sync():
             updated = await upsert_rows(rows)
             if updated <= 0:
                 raise RuntimeError(
-                    "rows captured but no positive values safe to persist"
+                    "official account rows were captured but CRM did not acknowledge persistence"
                 )
             state["last_status"] = "success"
             state["last_updated"] = updated
