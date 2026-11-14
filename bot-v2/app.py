@@ -22,6 +22,13 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
+OPENAI_TRANSCRIPTION_API_KEY = (
+    os.environ.get("OPENAI_TRANSCRIPTION_API_KEY", "").strip()
+    or os.environ.get("OPENAI_API_KEY", "").strip()
+)
+OPENAI_TRANSCRIPTION_MODEL = os.environ.get(
+    "OPENAI_TRANSCRIPTION_MODEL", "gpt-4o-mini-transcribe"
+).strip()
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID", "")
 SUPPORT_FORUM_CHAT_ID = os.environ.get("SUPPORT_FORUM_CHAT_ID", "").strip()
 ACTIVE_SUPPORT_FORUM_CHAT_ID = SUPPORT_FORUM_CHAT_ID
@@ -1890,7 +1897,9 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user and update.effective_user.is_bot:
         log.info("Messaggio Telegram ignorato da account bot: @%s", update.effective_user.username or update.effective_user.id)
         return
-    testo = msg.text or ""
+    # Voice messages place their verified transcription here, then reuse the
+    # same CRM, language, AI and escalation pipeline as ordinary text.
+    testo = str(context.user_data.pop("_voice_transcription", "") or msg.text or "")
     # Il messaggio continua a essere archiviato e visibile nel Topic, ma non
     # avvia alcuna risposta automatica finche' l'admin non la riaccende.
     if not AI_AUTOREPLY_ENABLED and not is_admin_chat(update.effective_chat.id):
@@ -2001,6 +2010,56 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
     await msg.reply_text(risposta, disable_web_page_preview=True)
     await record_message(update, "out", risposta, "ai")
+
+
+async def transcribe_voice_message(update: Update) -> str:
+    """Return a voice transcription without persisting audio bytes on Railway."""
+    msg = update.effective_message
+    if not msg or not msg.voice:
+        return ""
+    if not OPENAI_TRANSCRIPTION_API_KEY:
+        raise RuntimeError("transcription API key is not configured")
+    telegram_file = await msg.voice.get_file()
+    audio = await telegram_file.download_as_bytearray()
+    if not audio:
+        raise RuntimeError("empty Telegram voice file")
+    filename = "voice.ogg"
+    headers = {"Authorization": f"Bearer {OPENAI_TRANSCRIPTION_API_KEY}"}
+    files = {"file": (filename, bytes(audio), "audio/ogg")}
+    data = {"model": OPENAI_TRANSCRIPTION_MODEL, "response_format": "json"}
+    async with httpx.AsyncClient(timeout=50) as client:
+        response = await client.post(
+            "https://api.openai.com/v1/audio/transcriptions",
+            headers=headers,
+            data=data,
+            files=files,
+        )
+    if response.status_code >= 300:
+        raise RuntimeError(f"voice transcription HTTP {response.status_code}")
+    text = str((response.json() or {}).get("text") or "").strip()
+    if not text:
+        raise RuntimeError("empty voice transcription")
+    return text
+
+
+async def voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Transcribe a customer voice note and pass it through the text pipeline."""
+    msg = update.effective_message
+    if not msg or not msg.voice:
+        return
+    if update.effective_user and update.effective_user.is_bot:
+        return
+    try:
+        transcription = await transcribe_voice_message(update)
+    except Exception as exc:
+        log.warning("Trascrizione vocale non disponibile: %s", exc)
+        await record_message(update, "in", "[Vocale ricevuto: trascrizione non disponibile]", "lead")
+        await msg.reply_text(
+            "Ho ricevuto il vocale, ma non riesco a trascriverlo ora. Puoi scrivermi il messaggio qui?"
+        )
+        return
+    context.user_data["_voice_transcription"] = transcription
+    await text_message(update, context)
 
 
 async def payment_screenshot_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2505,6 +2564,7 @@ def main():
     app.add_handler(CallbackQueryHandler(payment_review_callback, pattern=r"^pay:(?:approve|reject):"))
     app.add_handler(MessageHandler(filters.ChatType.SUPERGROUP, forum_operator_message), group=1)
     app.add_handler(MessageHandler(filters.PHOTO & filters.ChatType.PRIVATE, payment_screenshot_message))
+    app.add_handler(MessageHandler(filters.VOICE & filters.ChatType.PRIVATE, voice_message))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, text_message))
     log.info("XAU Machine Bot v2 online")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
