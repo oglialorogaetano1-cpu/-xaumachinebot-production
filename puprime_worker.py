@@ -46,7 +46,10 @@ PU_API_LOOKBACK_DAYS = max(1, min(int(os.environ.get("PU_API_LOOKBACK_DAYS", "90
 # a customer account number.
 # Railway may preserve an old variable as an empty string.  Treat that exactly
 # like an unset value so authenticated account rows retain their IB identity.
-PU_API_AFFILIATE_ID = os.environ.get("PU_API_AFFILIATE_ID", "").strip() or PU_API_USER_ID
+# The CRM must receive one coherent IB identity.  Do not fall back to legacy
+# affiliate identifiers: the owner confirmed that this integration serves only
+# the current PU Prime IB/rebate account.
+PU_API_AFFILIATE_ID = "33775032"
 KNOWN_ENDPOINTS = (
     "queryRebateVolumeList",
     "queryClientReport",
