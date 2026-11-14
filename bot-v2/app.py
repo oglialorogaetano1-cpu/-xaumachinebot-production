@@ -870,26 +870,29 @@ async def crm_set_ai_control(chat_id: int, mode: str) -> dict:
 async def google_translate_from_italian(text: str, target_language: str) -> tuple[str, bool]:
     """Traduce con Google Cloud Translation; non usa il modello conversazionale."""
     target = (target_language or "it").split("-", 1)[0].lower()
-    if target in ("", "it") or not GOOGLE_TRANSLATE_API_KEY:
-        return text, target in ("", "it")
-    for attempt in range(2):
-        try:
-            async with httpx.AsyncClient(timeout=12) as client:
-                r = await client.post(
-                    "https://translation.googleapis.com/language/translate/v2",
-                    params={"key": GOOGLE_TRANSLATE_API_KEY},
-                    json={"q": text, "source": "it", "target": target, "format": "text"},
-                )
-            if r.status_code < 300:
-                translated = (((r.json().get("data") or {}).get("translations") or [{}])[0].get("translatedText") or "").strip()
-                if translated:
-                    return translated, True
-            else:
-                log.warning("Google Translate fallito tentativo %s: %s", attempt + 1, r.status_code)
-        except Exception as exc:
-            log.warning("Google Translate non disponibile tentativo %s: %s", attempt + 1, exc)
-        if attempt == 0:
-            await asyncio.sleep(0.4)
+    if target in ("", "it"):
+        return text, True
+    if GOOGLE_TRANSLATE_API_KEY:
+        for attempt in range(2):
+            try:
+                async with httpx.AsyncClient(timeout=12) as client:
+                    r = await client.post(
+                        "https://translation.googleapis.com/language/translate/v2",
+                        params={"key": GOOGLE_TRANSLATE_API_KEY},
+                        json={"q": text, "source": "it", "target": target, "format": "text"},
+                    )
+                if r.status_code < 300:
+                    translated = (((r.json().get("data") or {}).get("translations") or [{}])[0].get("translatedText") or "").strip()
+                    if translated:
+                        return translated, True
+                else:
+                    log.warning("Google Translate fallito tentativo %s: %s", attempt + 1, r.status_code)
+            except Exception as exc:
+                log.warning("Google Translate non disponibile tentativo %s: %s", attempt + 1, exc)
+            if attempt == 0:
+                await asyncio.sleep(0.4)
+    # Se Google non è configurato o non risponde, la Edge Function traduce in
+    # modalità strettamente vincolata: niente prompt commerciale né risposta AI.
     return await ai_translate_text(text, "Italian", target)
 
 
