@@ -48,6 +48,10 @@ GOOGLE_TRANSLATE_API_KEY = os.environ.get("GOOGLE_TRANSLATE_API_KEY", "").strip(
 AI_AUTOREPLY_ENABLED = os.environ.get("AI_AUTOREPLY_ENABLED", "true").strip().lower() in {
     "1", "true", "yes", "on",
 }
+# Prevent a single unresolved exchange from generating an alert for every
+# customer message while still notifying the administrator promptly.
+HANDOFF_NOTIFICATION_COOLDOWN_SECONDS = 30 * 60
+_handoff_notification_at: dict[str, datetime] = {}
 MT5_SHOWCASE_ENABLED = False
 # Modalita' operatore: nessun flusso automatico verso i clienti. Il bot resta
 # connesso per archiviare i messaggi nei Topic e tradurli per lo staff.
@@ -258,7 +262,9 @@ Non inventare verifiche IB, depositi, risultati, saldi o rendimenti e non promet
 Non aggiungere automaticamente disclaimer sul rischio, avvertenze generiche sul trading o
 promemoria sullo stop loss. Parlane soltanto se il cliente chiede esplicitamente informazioni
 su rischi, perdite o gestione del rischio. Se non hai un dato reale o non sai rispondere,
-proponi il passaggio a un operatore umano.
+gira la richiesta a un collega. In quel caso comunica soltanto, nella lingua del cliente,
+che inoltrerai il contatto a un collega che rispondera' qui appena possibile: non citare
+operatori, pannelli, dati gia' disponibili, log o processi interni.
 Se chiedono una verifica PU Prime e non esiste una verifica reale nei dati, rispondi:
 "Al momento non ti trovo dentro iscritto con noi su PU Prime, sei sicuro? Hai scritto bene nome e cognome?"
 Non dire "verifico" se non hai un dato reale. Quando chiedono la sala segnali, fornisci sempre il link ufficiale.
@@ -1691,6 +1697,37 @@ async def genera_risposta_ai(testo: str, contesto: dict) -> tuple[str, dict]:
         )
     return risposta, metadati
 
+
+async def notify_admin_handoff(update: Update, customer_text: str, reason: str) -> bool:
+    """Create one actionable private alert when AI hands a customer to staff."""
+    user = update.effective_user
+    chat = update.effective_chat
+    if not ADMIN_CHAT_ID or not user or not chat:
+        return False
+    key = str(chat.id)
+    now = datetime.now(timezone.utc)
+    previous = _handoff_notification_at.get(key)
+    if previous and (now - previous).total_seconds() < HANDOFF_NOTIFICATION_COOLDOWN_SECONDS:
+        return True
+    display_name = (user.full_name or user.username or "Cliente").strip()
+    username = f"@{user.username}" if user.username else "senza username"
+    body = (customer_text or "").strip()[:1500]
+    try:
+        await update.get_bot().send_message(
+            chat_id=int(ADMIN_CHAT_ID),
+            text=(
+                "🔔 Richiesta da gestire\n"
+                f"Cliente: {display_name} ({username})\n"
+                f"Motivo: {reason}\n"
+                f"Messaggio: {body or 'n/d'}"
+            ),
+        )
+        _handoff_notification_at[key] = now
+        return True
+    except Exception as exc:
+        log.warning("Notifica handoff admin fallita: %s", exc)
+        return False
+
 async def track_start(update: Update, deep_link_code: str):
     if not CRM_TRACKING_SECRET or not update.effective_user or not update.effective_chat:
         return
@@ -1901,10 +1938,29 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         risposta, metadati = await genera_risposta_ai(testo, contesto)
     except Exception as exc:
         log.error("Risposta AI non disponibile: %s", exc)
-        risposta = ("In questo momento l'assistente automatico non riesce a rispondere. "
-                    "Ho segnalato il problema: puoi riprovare tra poco oppure chiedermi "
-                    "di parlare con un operatore.")
-        metadati = {}
+        risposta = (
+            "La tua richiesta richiede un controllo aggiuntivo. "
+            "La giro a un collega che ti rispondera' qui appena possibile."
+        )
+        metadati = {"should_escalate": True, "escalation_reason": "risposta AI non disponibile"}
+    if metadati.get("should_escalate"):
+        reason = str(metadati.get("escalation_reason") or metadati.get("intent") or "richiesta cliente")[:300]
+        chat_id = str(update.effective_chat.id)
+        await crm_insert(
+            "crm_human_handoffs",
+            {
+                "reason": reason,
+                "priority": "high",
+                "status": "open",
+                "channels": ["telegram"],
+                "metadata": {
+                    "telegram_chat_id": chat_id,
+                    "telegram_user_id": str(update.effective_user.id) if update.effective_user else None,
+                    "customer_message": testo[:1500],
+                },
+            },
+        )
+        await notify_admin_handoff(update, testo, reason)
     next_action = str(metadati.get("next_action") or "")
     if next_action.startswith("request_mt5_snapshot:"):
         periodo_ai = estrai_periodo_mt5(next_action.split(":", 1)[1])
