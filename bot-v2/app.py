@@ -32,6 +32,11 @@ GLOBAL_AI_CONTROL_CHAT_ID = 0
 # riattivare il bot non deve riavviare campagne o solleciti automatici.
 CUSTOMER_AUTO_REPLY_ENABLED = os.environ.get("CUSTOMER_AUTO_REPLY_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
 FOLLOWUP_AUTOMATION_ENABLED = os.environ.get("FOLLOWUP_AUTOMATION_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
+# Explicitly suspended until a dedicated customer-facing account and approved
+# credentials are configured. This blocks all automatic showcase/history flows.
+SHOWCASE_ACCESS_ENABLED = False
+HANDOFF_NOTIFICATION_COOLDOWN_SECONDS = 30 * 60
+_handoff_notification_at: dict[str, datetime] = {}
 MT5_INVESTOR_PLATFORM = os.environ.get("MT5_INVESTOR_PLATFORM", "")
 MT5_INVESTOR_BROKER = os.environ.get("MT5_INVESTOR_BROKER", "")
 MT5_INVESTOR_SERVER = os.environ.get("MT5_INVESTOR_SERVER", "")
@@ -215,6 +220,13 @@ Rispondi in modo naturale, fluido e breve nella lingua usata dal cliente.
 Non usare Markdown: non scrivere asterischi, doppi asterischi, hashtag di titoli o altri segni di formattazione.
 Non chiedere al cliente di usare comandi: i comandi sono riservati all'amministratore.
 Segui il prompt commerciale del CRM e usa lo storico della conversazione.
+Non proporre, suggerire o inviare storico, screenshot, accesso Investor/MT5 o
+periodi di performance. Mantieni la conversazione sull'iscrizione, sulla
+configurazione corretta del conto e sul prossimo passaggio richiesto dal cliente.
+Non nominare la strategia, il suo nome commerciale o il suo codice prima che il
+cliente risulti verificato nei dati PU Prime. Prima della verifica parla soltanto
+di "strategia di copy trading". Non citare percentuali di rendimento, target
+giornalieri o simulazioni di guadagno.
 Non inventare verifiche IB, depositi, risultati, saldi o rendimenti e non promettere guadagni.
 Non aggiungere automaticamente disclaimer sul rischio, avvertenze generiche sul trading o
 promemoria sullo stop loss. Parlane soltanto se il cliente chiede esplicitamente informazioni
@@ -246,8 +258,8 @@ POST_PROMPT_GUARD = """REGOLE FINALI NON DEROGABILI (prevalgono su ogni testo pr
   della registrazione; non citare alcun nome, codice o numero della strategia."""
 
 CUSTOMER_FAQ_ADDENDUM = """FAQ OPERATIVA AGGIUNTIVA (integra il prompt CRM, non lo sostituisce):
-- Mantieni le risposte brevi, naturali e nella lingua del cliente: di norma una o due frasi. Non offrire spontaneamente
-  screenshot, accesso MT5 o dati storici; fallo solo quando il cliente lo domanda.
+- Mantieni le risposte brevi, naturali e nella lingua del cliente: di norma una o due frasi. Non offrire né inviare
+  screenshot, accesso MT5 o dati storici, anche quando il cliente lo domanda.
 - Spiega che non offriamo segnali manuali: il servizio usa copy trading automatizzato presso i broker supportati.
   Il bot non viene installato sul MT4/MT5 personale e non richiede VPS o computer acceso.
 - Per l'apertura del conto, ricorda con chiarezza: Copy Popular Trading, tipo Standard, non MT4/MT5.
@@ -265,16 +277,15 @@ CUSTOMER_FAQ_ADDENDUM = """FAQ OPERATIVA AGGIUNTIVA (integra il prompt CRM, non 
   cliente lo chieda.
 - Le valute disponibili, l'aggiunta di fondi, l'attivazione e i documenti per verifica/prelievi dipendono dalle procedure
   del broker. L'attivazione è normalmente rapida dopo i requisiti richiesti, senza promettere tempi fissi.
-- Se chiedono Myfxbook, rispondi che non pubblichiamo un profilo Myfxbook. Se chiedono lo storico, puoi dire che è
-  disponibile un eventuale accesso Investor in sola lettura per vedere l'operatività, quando configurato, ma non va
-  presentato come storico completo né come garanzia di risultati."""
+- Se chiedono Myfxbook o storico, non proporre accessi, credenziali, screenshot o alternative tecniche: riporta la
+  conversazione all'iscrizione e alla configurazione del conto."""
 
 PU_PRIME_NOT_FOUND = (
     "Al momento non ti trovo dentro iscritto con noi su PU Prime, sei sicuro? "
     "Hai scritto bene nome e cognome?"
 )
 
-DEFAULT_WELCOME_MESSAGE = "Ciao 👋 Benvenuto in XAU Machine. Posso spiegarti come funziona il copy trading automatico, aiutarti con PU Prime oppure mostrarti dati storici disponibili. Da cosa vuoi partire?"
+DEFAULT_WELCOME_MESSAGE = "Ciao 👋 Benvenuto in XAU Machine. Posso spiegarti come funziona il copy trading automatico e aiutarti con PU Prime. Hai già un conto?"
 VERIFIED_IB_GUIDE_MARKER = "GUIDA UFFICIALE PU PRIME"
 VERIFIED_IB_COMPLETION_REPLY = (
     "Perfetto 👍 Mandami ora uno screenshot della schermata Copy Popular Trading "
@@ -902,17 +913,11 @@ async def google_translate_to_italian(text: str) -> tuple[str, bool, str]:
     if is_obvious_short_italian(text):
         return text, False, "it"
 
-    # Google non e' configurato nel servizio live: fallback AI strettamente
-    # limitato alla traduzione, senza il prompt commerciale.
+    # Una traduzione del Topic deve essere verificabile. Se Google non risponde,
+    # conserviamo solo l'originale: un modello conversazionale non deve mai
+    # trasformare un errore in una risposta commerciale mascherata da traduzione.
     detected = await ai_detect_language(text) or obvious_message_language(text)
-    if detected == "it":
-        return text, False, detected
-    # Non indovinare la lingua e non usare l'AI per riempire il Topic: in caso
-    # di incertezza mostriamo esclusivamente il messaggio originale.
-    if not detected:
-        return text, False, ""
-    italian, translated = await ai_translate_text(text, detected or "auto-detected language", "Italian")
-    return italian, translated, detected
+    return text, False, detected
 
 
 async def ai_detect_language(text: str) -> str:
@@ -1174,11 +1179,10 @@ async def mirror_text_to_forum(update: Update, direction: str, body: str,
         "🧑‍💼 Operatore" if sender_type == "human" else "🤖 Assistente"
     )
     topic_body = body[:3900]
-    # Il Topic deve mostrare anche la resa italiana delle risposte automatiche:
-    # prima venivano tradotti solo i messaggi in entrata del cliente, quindi
-    # lo staff vedeva la domanda in italiano ma non la risposta dell'AI.
-    # I messaggi scritti manualmente dagli operatori restano invece invariati.
-    if direction not in ("out", "outbound") or sender_type == "ai":
+    # Traduci soltanto i messaggi in entrata del cliente. La risposta AI rimane
+    # nella lingua effettivamente inviata: una copia italiana nel Topic sembra
+    # una bozza o una risposta non realmente inviata.
+    if direction not in ("out", "outbound"):
         italian, translated, detected_language = await google_translate_to_italian(topic_body)
         # Salva la lingua soltanto sul messaggio in entrata del cliente.  Le
         # risposte dell'AI e la lingua dell'app Telegram non devono mai
@@ -1960,11 +1964,22 @@ def proteggi_risposta_cliente(risposta: str, puprime_data: dict) -> str:
     only control that prevents pre-verification disclosure of activation data.
     """
     cleaned = (risposta or "").replace("*", "")
-    if str((puprime_data or {}).get("status") or "") == "matched":
-        return cleaned.strip()
-    for identifier in PRIVATE_STRATEGY_IDENTIFIERS:
-        cleaned = re.sub(re.escape(identifier), "dettagli di attivazione", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"\b(?:numero|codice)\s+(?:della\s+)?strategia\s*[:#-]?\s*\w+", "dettagli di attivazione", cleaned, flags=re.IGNORECASE)
+    language = "en" if re.search(r"\b(?:the|and|your|please|account)\b", cleaned, re.IGNORECASE) else "it"
+    if str((puprime_data or {}).get("status") or "") != "matched":
+        for identifier in PRIVATE_STRATEGY_IDENTIFIERS:
+            cleaned = re.sub(re.escape(identifier), "copy-trading strategy" if language == "en" else "strategia di copy trading", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\b(?:numero|codice)\s+(?:della\s+)?strategia\s*[:#-]?\s*\w+", "dettagli di attivazione", cleaned, flags=re.IGNORECASE)
+    prohibited = re.compile(
+        r"\b(?:historical|history|historic|storico|storica|MT5|MetaTrader|Investor|"
+        r"screenshot|screen\s*shot|5\s*%|10\s*%|per\s+day|al\s+giorno)\b",
+        flags=re.IGNORECASE,
+    )
+    if prohibited.search(cleaned):
+        return (
+            "It is an automatic copy-trading service on the broker platform, and the account remains in your name. Tell me whether you already have a PU Prime or Ultima Markets account and I’ll guide you through the next step."
+            if language == "en" else
+            "È un servizio di copy trading automatico sulla piattaforma del broker e il conto resta intestato a te. Dimmi se hai già un conto PU Prime o Ultima Markets e ti guido nel prossimo passaggio."
+        )
     return cleaned.strip()
 
 
@@ -1990,10 +2005,44 @@ def completed_verified_ib_guide(text: str, history: list[dict]) -> bool:
     )
 
 
+def sembra_nominativo_puprime(testo: str) -> bool:
+    """Recognize a short plain name supplied for an IB check."""
+    pulito = re.sub(r"[^A-Za-zÀ-ÖØ-öø-ÿ' -]", " ", testo or "").strip()
+    parole = [word for word in pulito.split() if len(word) >= 2]
+    if not 2 <= len(parole) <= 4:
+        return False
+    excluded = {
+        "come", "funziona", "copy", "trading", "voglio", "sapere", "conto",
+        "sono", "gia", "registrato", "registrata", "fatto", "grazie", "perche",
+    }
+    return not any(word.casefold() in excluded for word in parole)
+
+
+def richiede_verifica_puprime(testo: str) -> bool:
+    """Call the official lookup only for a real verification request."""
+    normalized = re.sub(r"\s+", " ", (testo or "").casefold()).strip()
+    if sembra_nominativo_puprime(testo) or re.search(r"\b\d{5,}\b", normalized):
+        return True
+    terms = (
+        "pu prime", "puprime", " ib", "registered", "registration", "verify",
+        "verification", "linked", "account number", "user id", "numero conto",
+        "id utente", "registrato", "registrata", "verifica", "collegato", "collegata",
+    )
+    return any(term in normalized for term in terms)
+
+
 async def genera_risposta_ai(testo: str, contesto: dict) -> tuple[str, dict]:
     prompt_crm = (contesto.get("prompt") or "").strip()
     instructions = AI_RUNTIME_RULES
-    instructions += "\n\n" + puprime_prompt_context(contesto.get("puprime") or {})
+    puprime = contesto.get("puprime")
+    # La verifica PU Prime e' un dato puntuale. Iniettarne un esito "non
+    # trovato" anche per un normale saluto portava il modello a risposte fuori
+    # contesto e alla falsa frase sull'operatore.
+    if isinstance(puprime, dict) and puprime.get("status"):
+        instructions += "\n\n" + puprime_prompt_context(puprime)
+    customer_language = str(contesto.get("customer_language") or "").split("-", 1)[0].lower()
+    if customer_language:
+        instructions += f"\n\nLINGUA VINCOLATA DEL CLIENTE: {customer_language}. Rispondi solo in questa lingua."
     if prompt_crm:
         instructions += "\n\nPROMPT COMMERCIALE ATTIVO DAL CRM:\n" + prompt_crm
     # This must come after the editable CRM prompt so an older or conflicting
@@ -2052,6 +2101,34 @@ async def genera_risposta_ai(testo: str, contesto: dict) -> tuple[str, dict]:
             metadati.get("should_escalate"), metadati.get("follow_up_type"),
         )
     return risposta, metadati
+
+
+async def notify_admin_handoff(update: Update, customer_text: str, reason: str) -> bool:
+    """Send one private, actionable alert when the AI genuinely escalates."""
+    user = update.effective_user
+    chat = update.effective_chat
+    if not ADMIN_CHAT_ID or not user or not chat:
+        return False
+    key = str(chat.id)
+    now = datetime.now(timezone.utc)
+    previous = _handoff_notification_at.get(key)
+    if previous and (now - previous).total_seconds() < HANDOFF_NOTIFICATION_COOLDOWN_SECONDS:
+        return True
+    try:
+        await update.get_bot().send_message(
+            chat_id=int(ADMIN_CHAT_ID),
+            text=(
+                "🔔 Cliente da gestire\n"
+                f"Cliente: {user.full_name or 'n/d'} (@{user.username or 'senza_username'})\n"
+                f"Chat: {chat.id}\nMotivo: {reason[:300]}\n"
+                f"Ultimo messaggio: {(customer_text or '').strip()[:1200]}"
+            ),
+        )
+        _handoff_notification_at[key] = now
+        return True
+    except Exception as exc:
+        log.warning("Notifica privata handoff fallita: %s", exc)
+        return False
 
 async def track_start(update: Update, deep_link_code: str):
     if not CRM_TRACKING_SECRET or not update.effective_user or not update.effective_chat:
@@ -2225,7 +2302,7 @@ async def text_message(
         any(x in testo_lower for x in ("investor", "sola lettura")),
     )
     richiesta_composta = sum(categorie_richieste) >= 2
-    if not richiesta_composta and chiede_credenziali_investor_mt5(testo):
+    if SHOWCASE_ACCESS_ENABLED and not richiesta_composta and chiede_credenziali_investor_mt5(testo):
         risposta_credenziali = testo_credenziali_investor_mt5()
         await record_message(update, "in", testo, "lead")
         if risposta_credenziali:
@@ -2244,12 +2321,12 @@ async def text_message(
             await msg.reply_text(risposta_errore)
             await record_message(update, "out", risposta_errore, "ai")
         return
-    if context.user_data.pop("awaiting_mt5_period", False):
+    if SHOWCASE_ACCESS_ENABLED and context.user_data.pop("awaiting_mt5_period", False):
         periodo_risposta = estrai_periodo_mt5(testo)
         if periodo_risposta:
             await richiedi_screenshot_mt5(update, context, periodo_risposta, testo)
             return
-    periodo = None if richiesta_composta else rileva_richiesta_screenshot(testo)
+    periodo = None if (richiesta_composta or not SHOWCASE_ACCESS_ENABLED) else rileva_richiesta_screenshot(testo)
     if periodo == PERIODO_DA_CHIEDERE:
         context.user_data["awaiting_mt5_period"] = True
         domanda = "Certo 📊 Ti va bene l'andamento di oggi oppure vuoi un altro periodo, per esempio una settimana, un mese o 4 mesi?"
@@ -2261,11 +2338,38 @@ async def text_message(
         await richiedi_screenshot_mt5(update, context, periodo, testo)
         return
     contesto = await record_message(update, "in", testo, "lead")
-    if completed_verified_ib_guide(testo, contesto.get("history") or []):
+    if SHOWCASE_ACCESS_ENABLED and completed_verified_ib_guide(testo, contesto.get("history") or []):
         await msg.reply_text(VERIFIED_IB_COMPLETION_REPLY)
         await record_message(update, "out", VERIFIED_IB_COMPLETION_REPLY, "ai")
         return
-    contesto["puprime"] = await crm_puprime_context(update, testo)
+    mapping = await crm_topic_lookup(telegram_user_id=update.effective_user.id) if update.effective_user else {}
+    contesto["customer_language"] = await latest_customer_language(mapping)
+    if richiede_verifica_puprime(testo):
+        contesto["puprime"] = await crm_puprime_context(update, testo)
+    puprime_status = str((contesto.get("puprime") or {}).get("status") or "")
+    if sembra_nominativo_puprime(testo) and puprime_status in {"not_found", "unavailable", "ambiguous"}:
+        english = contesto["customer_language"] == "en"
+        if puprime_status == "ambiguous":
+            reply_lookup = (
+                "I found more than one person with this name. Please send your PU Prime account number or user ID so I can check the correct record."
+                if english else
+                "Trovo più persone con questo nome. Inviami il numero conto PU Prime o l'ID utente così controllo il record corretto."
+            )
+        elif puprime_status == "unavailable":
+            reply_lookup = (
+                "PU Prime verification is temporarily unavailable. Please try again shortly or send your account number or user ID."
+                if english else
+                "La verifica PU Prime è temporaneamente non disponibile. Riprova tra poco oppure inviami il numero conto o l'ID utente."
+            )
+        else:
+            reply_lookup = (
+                "I can’t find this name linked to our IB at the moment. Please send your PU Prime account number or user ID and I’ll check that."
+                if english else
+                "Con questo nome al momento non risulti collegato al nostro IB. Se puoi, inviami il numero conto o l'ID utente PU Prime e controllo quello."
+            )
+        await msg.reply_text(reply_lookup)
+        await record_message(update, "out", reply_lookup, "ai")
+        return
     if not await crm_ai_attiva(update.effective_chat.id):
         return
     # Le conversazioni già gestite a mano restano sospese dal controllo IA
@@ -2282,12 +2386,25 @@ async def text_message(
         risposta, metadati = await genera_risposta_ai(testo, contesto)
     except Exception as exc:
         log.error("Risposta AI non disponibile: %s", exc)
-        risposta = ("In questo momento l'assistente automatico non riesce a rispondere. "
-                    "Ho segnalato il problema: puoi riprovare tra poco oppure chiedermi "
-                    "di parlare con un operatore.")
-        metadati = {}
+        risposta = (
+            "The automatic assistant cannot reply at the moment. Please try again shortly or ask for a colleague."
+            if contesto["customer_language"] == "en" else
+            "In questo momento l'assistente automatico non riesce a rispondere. Riprova tra poco oppure chiedimi un collega."
+        )
+        metadati = {"should_escalate": True, "escalation_reason": "risposta AI non disponibile"}
+    if metadati.get("should_escalate"):
+        reason = str(metadati.get("escalation_reason") or metadati.get("intent") or "richiesta cliente")
+        alerted = await notify_admin_handoff(update, testo, reason)
+        if not alerted:
+            # Never tell the client a colleague was notified when the private
+            # alert itself was not delivered.
+            risposta = (
+                "I need an additional check before I can answer. Please try again shortly."
+                if contesto["customer_language"] == "en" else
+                "Mi serve un controllo aggiuntivo prima di risponderti. Riprova tra poco."
+            )
     next_action = str(metadati.get("next_action") or "")
-    if next_action.startswith("request_mt5_snapshot:"):
+    if SHOWCASE_ACCESS_ENABLED and next_action.startswith("request_mt5_snapshot:"):
         periodo_ai = estrai_periodo_mt5(next_action.split(":", 1)[1])
         if not periodo_ai:
             valore = next_action.split(":", 1)[1].strip()
