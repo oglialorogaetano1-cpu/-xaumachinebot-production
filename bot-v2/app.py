@@ -896,11 +896,21 @@ async def google_translate_to_italian(text: str) -> tuple[str, bool, str]:
             log.warning("Google Translate verso italiano fallito %s: %s", r.status_code, r.text[:200])
         except Exception as exc:
             log.warning("Google Translate verso italiano non disponibile: %s", exc)
+    # Prima del fallback esterno riconosciamo le frasi italiane brevi e comuni.
+    # Senza questa guardia, un "Ci sei?" può essere classificato male e il
+    # modello di traduzione può produrre una risposta anziché una traduzione.
+    if is_obvious_short_italian(text):
+        return text, False, "it"
+
     # Google non e' configurato nel servizio live: fallback AI strettamente
     # limitato alla traduzione, senza il prompt commerciale.
     detected = await ai_detect_language(text) or obvious_message_language(text)
     if detected == "it":
         return text, False, detected
+    # Non indovinare la lingua e non usare l'AI per riempire il Topic: in caso
+    # di incertezza mostriamo esclusivamente il messaggio originale.
+    if not detected:
+        return text, False, ""
     italian, translated = await ai_translate_text(text, detected or "auto-detected language", "Italian")
     return italian, translated, detected
 
@@ -951,6 +961,18 @@ def obvious_message_language(text: str) -> str:
     candidates = [(len(words & values), code) for code, values in markers.items()]
     score, language = max(candidates, default=(0, ""))
     return language if score >= 2 else ""
+
+
+def is_obvious_short_italian(text: str) -> bool:
+    """Recognise terse Italian messages before any AI translation fallback."""
+    normalized = re.sub(r"[^a-zàèéìòóù]+", " ", text.casefold()).strip()
+    if normalized in {
+        "ci sei", "ciao", "ciao ci sei", "come funziona", "cioe",
+        "grazie", "va bene", "ok", "perfetto", "buona sera",
+        "buongiorno", "buonasera", "mi aiuti", "non capisco",
+    }:
+        return True
+    return obvious_message_language(text) == "it"
 
 
 async def latest_customer_language(mapping: dict) -> str:
