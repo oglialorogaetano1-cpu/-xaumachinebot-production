@@ -1765,6 +1765,23 @@ async def notify_admin_handoff(update: Update, customer_text: str, reason: str) 
         log.warning("Notifica handoff admin fallita: %s", exc)
         return False
 
+
+def sembra_nominativo_puprime(testo: str) -> bool:
+    """True only for a short, plain name supplied after a registration check.
+
+    This prevents the AI from pretending that a name was checked or handed off
+    when the authoritative PU Prime lookup says otherwise.
+    """
+    pulito = re.sub(r"[^A-Za-zÀ-ÖØ-öø-ÿ' -]", " ", testo or "").strip()
+    parole = [p for p in pulito.split() if len(p) >= 2]
+    if not 2 <= len(parole) <= 4:
+        return False
+    esclusioni = {
+        "come", "funziona", "copy", "trading", "voglio", "sapere", "conto",
+        "sono", "gia", "registrato", "registrata", "fatto", "grazie", "perche",
+    }
+    return not any(p.lower() in esclusioni for p in parole)
+
 async def track_start(update: Update, deep_link_code: str):
     if not CRM_TRACKING_SECRET or not update.effective_user or not update.effective_chat:
         return
@@ -1972,6 +1989,27 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     contesto = await record_message(update, "in", testo, "lead")
     contesto["puprime"] = await crm_puprime_context(update, testo)
+    esito_puprime = str(contesto["puprime"].get("status") or "not_found")
+    # A bare name is a request for a factual IB lookup. Do not delegate it to
+    # the model: it used to hallucinate a completed operator handoff when no
+    # real lookup match (or notification) existed.
+    if sembra_nominativo_puprime(testo):
+        if esito_puprime == "not_found":
+            risposta_lookup = (
+                "Con questo nome al momento non risulti collegato al nostro IB. "
+                "Se puoi, inviami il numero conto o l'ID utente PU Prime e controllo quello."
+            )
+            await msg.reply_text(risposta_lookup)
+            await record_message(update, "out", risposta_lookup, "ai")
+            return
+        if esito_puprime == "unavailable":
+            risposta_lookup = (
+                "La verifica PU Prime non è disponibile in questo momento. "
+                "Riprova tra poco oppure inviami il numero conto o l'ID utente."
+            )
+            await msg.reply_text(risposta_lookup)
+            await record_message(update, "out", risposta_lookup, "ai")
+            return
     if not await crm_ai_attiva(update.effective_chat.id):
         return
     try:
@@ -2000,7 +2038,14 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 },
             },
         )
-        await notify_admin_handoff(update, testo, reason)
+        handoff_notified = await notify_admin_handoff(update, testo, reason)
+        if not handoff_notified:
+            # Never tell the customer that a colleague was alerted if the
+            # private alert was not actually delivered.
+            risposta = (
+                "La verifica richiede un controllo aggiuntivo, ma non è disponibile ora. "
+                "Riprova tra poco oppure inviami il numero conto o l'ID utente PU Prime."
+            )
     next_action = str(metadati.get("next_action") or "")
     if SHOWCASE_ACCESS_ENABLED and next_action.startswith("request_mt5_snapshot:"):
         periodo_ai = estrai_periodo_mt5(next_action.split(":", 1)[1])
