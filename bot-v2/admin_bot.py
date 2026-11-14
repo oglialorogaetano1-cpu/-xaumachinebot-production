@@ -1955,7 +1955,14 @@ def run_bot():
     app.add_handler(MessageHandler(filters.PHOTO, photo_message))
     app.add_handler(MessageHandler(filters.Document.ALL, prompt_txt_message))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message))
-    app.run_polling(drop_pending_updates=False, bootstrap_retries=-1)
+    # The outer loop below retries temporary Telegram network failures.  Do not
+    # close the shared event loop after a failed polling startup, otherwise the
+    # next retry raises "RuntimeError: Event loop is closed".
+    app.run_polling(
+        drop_pending_updates=False,
+        bootstrap_retries=-1,
+        close_loop=False,
+    )
 
 
 def main():
