@@ -806,6 +806,64 @@ async def google_translate_from_italian(text: str, target_language: str) -> tupl
     return await ai_translate_text(text, "Italian", target)
 
 
+async def detect_text_language(text: str) -> str:
+    """Restituisce la lingua reale del testo, non quella del profilo Telegram.
+
+    Molti utenti hanno Telegram impostato in italiano ma scrivono ai clienti in
+    inglese.  Per gli invii dal Topic conta sempre l'ultima lingua effettiva
+    rilevata nel testo; il language_code del profilo e' solo un valore iniziale.
+    """
+    content = (text or "").strip()
+    if len(content) < 3:
+        return ""
+    if GOOGLE_TRANSLATE_API_KEY:
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                response = await client.post(
+                    "https://translation.googleapis.com/language/translate/v2/detect",
+                    params={"key": GOOGLE_TRANSLATE_API_KEY},
+                    json={"q": content[:4000]},
+                )
+            if response.status_code < 300:
+                detections = (((response.json().get("data") or {}).get("detections") or [[]])[0])
+                detected = str((detections[0] if detections else {}).get("language") or "").lower()
+                if re.fullmatch(r"[a-z]{2,3}", detected):
+                    return detected
+            else:
+                log.warning("Rilevamento lingua Google fallito: %s", response.status_code)
+        except Exception as exc:
+            log.warning("Rilevamento lingua Google non disponibile: %s", exc)
+
+    # Fallback controllato: il servizio AI non riceve il prompt commerciale e
+    # puo' restituire soltanto il codice della lingua, mai una risposta cliente.
+    try:
+        async with httpx.AsyncClient(timeout=14) as client:
+            response = await client.post(
+                f"{SUPABASE_URL}/functions/v1/crm-ai-chat",
+                headers={
+                    "apikey": SUPABASE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "runtime_secret": CRM_TRACKING_SECRET,
+                    "tenant_slug": CRM_TENANT_SLUG,
+                    "instructions": (
+                        "LANGUAGE DETECTION ONLY. Return exactly one ISO 639-1 "
+                        "two-letter language code for the user's text. No prose, "
+                        "JSON, punctuation, explanations, or sales content."
+                    ),
+                    "input": [{"role": "user", "content": content[:4000]}],
+                },
+            )
+        candidate = str((response.json() or {}).get("text") or "").strip().lower()
+        match = re.fullmatch(r"[a-z]{2}", candidate)
+        return match.group(0) if match and response.status_code < 300 else ""
+    except Exception as exc:
+        log.warning("Rilevamento lingua AI non disponibile: %s", exc)
+        return ""
+
+
 async def ai_translate_text(text: str, source_language: str, target_language: str) -> tuple[str, bool]:
     """Fallback di sola traduzione, separato dal prompt commerciale clienti."""
     source_key = (source_language or "").strip().lower()
@@ -957,10 +1015,15 @@ async def mirror_text_to_forum(update: Update, direction: str, body: str,
     if inbound or sender_type == "ai":
         source_body = body[:1800]
         language = str(getattr(update.effective_user, "language_code", "") or "")
+        # Salva la lingua del testo reale prima della traduzione. Questo evita
+        # che un profilo Telegram impostato in italiano faccia inoltrare in
+        # italiano una risposta diretta a un cliente che scrive in inglese.
+        detected_from_text = await detect_text_language(source_body) if inbound else ""
         italian, translated, detected_language = await google_translate_to_italian(source_body, language)
+        detected_language = detected_from_text or detected_language
         # La lingua del messaggio reale prevale sul language_code del profilo,
         # che Telegram lascia spesso impostato in italiano anche per clienti esteri.
-        if inbound and detected_language and detected_language != "it" and update.effective_user:
+        if inbound and detected_language and update.effective_user:
             await crm_set_customer_language(update.effective_user.id, detected_language)
         if translated:
             topic_body = f"{source_body}\n\n🇮🇹 Traduzione italiana\n{italian[:1800]}"
