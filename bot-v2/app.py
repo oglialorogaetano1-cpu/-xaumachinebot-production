@@ -2709,6 +2709,13 @@ async def post_init(app):
 
 def main():
     threading.Thread(target=start_health_server, daemon=True, name="health-server").start()
+    # This legacy Railway service is deliberately kept alive only for rollback.
+    # It must never poll Telegram while the dedicated v2 customer bot owns the
+    # token, otherwise Telegram rejects both consumers with a getUpdates conflict.
+    if os.environ.get("RAILWAY_SERVICE_NAME") == "xau-machine-bot-live":
+        log.warning("Legacy service parked: Telegram polling is disabled")
+        threading.Event().wait()
+        return
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     app.add_error_handler(on_error)
     for cmd, fn in {"start":start,"help":help_cmd,"registrazione":registration,"verifica_ib":verify_ib,"deposito":deposit,"guida_bot":guide,"screenshot":screenshot,"intervento_umano":human,"attiva_supporto":activate_support_forum,"statistiche_canale":channel_stats}.items():
