@@ -7,6 +7,7 @@ import secrets
 import threading
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 import httpx
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CallbackQueryHandler, ChatJoinRequestHandler, ChatMemberHandler, CommandHandler, MessageHandler, ContextTypes, filters
@@ -50,6 +51,11 @@ AI_TRADER_GUIDE_IT_URL = os.environ.get(
     "https://ai-trader-mt5-checkout.vercel.app/guides/AI_Trader_MT5_Guida_Installazione_IT.pdf",
 ).strip()
 GOOGLE_TRANSLATE_API_KEY = os.environ.get("GOOGLE_TRANSLATE_API_KEY", "").strip()
+CUSTOMER_LANGUAGE_CACHE_PATH = Path(
+    os.environ.get("CUSTOMER_LANGUAGE_CACHE", "/data/customer-language.json")
+)
+_customer_language_cache_lock = threading.Lock()
+_customer_language_cache: dict[str, str] | None = None
 OPENAI_AUDIO_API_KEY = os.environ.get("OPENAI_AUDIO_API_KEY", "").strip()
 SIGNAL_ROOM_URL = "https://t.me/+-e1_tDFps0Q2YmE0"
 SIGNAL_ROOM_SOURCE = "signal_room_24h"
@@ -744,6 +750,7 @@ async def crm_store_language_code(update: Update, language: str) -> None:
     chat = update.effective_chat
     if not user or not chat or chat.type != "private" or not re.fullmatch(r"[a-z]{2,3}", language or ""):
         return
+    remember_customer_language(user.id, chat.id, language)
     headers = dict(CRM_HEADERS)
     headers.pop("Prefer", None)
     try:
@@ -956,7 +963,7 @@ def obvious_message_language(text: str) -> str:
     """Fast conservative fallback for common customer languages."""
     words = set(re.findall(r"[a-zàèéìòóùç']+", text.casefold()))
     markers = {
-        "en": {"the", "and", "you", "your", "how", "what", "with", "can", "please", "hello", "thanks"},
+        "en": {"the", "and", "you", "your", "how", "what", "with", "can", "please", "hello", "thanks", "i", "would", "like", "about", "information", "speak", "english", "want", "more", "first"},
         "fr": {"bonjour", "merci", "vous", "avec", "pour", "comment", "quel", "est", "une", "des"},
         "es": {"hola", "gracias", "para", "como", "quiero", "puedo", "con", "una", "que"},
         "de": {"hallo", "danke", "und", "ich", "mit", "wie", "für", "kann", "bitte"},
@@ -966,6 +973,53 @@ def obvious_message_language(text: str) -> str:
     candidates = [(len(words & values), code) for code, values in markers.items()]
     score, language = max(candidates, default=(0, ""))
     return language if score >= 2 else ""
+
+
+def _load_customer_language_cache() -> dict[str, str]:
+    global _customer_language_cache
+    with _customer_language_cache_lock:
+        if _customer_language_cache is not None:
+            return _customer_language_cache
+        try:
+            raw = json.loads(CUSTOMER_LANGUAGE_CACHE_PATH.read_text(encoding="utf-8"))
+            _customer_language_cache = raw if isinstance(raw, dict) else {}
+        except (OSError, ValueError, TypeError):
+            _customer_language_cache = {}
+        return _customer_language_cache
+
+
+def remember_customer_language(telegram_user_id: int, telegram_chat_id: int, language: str) -> None:
+    """Persist the language inferred from a real inbound message for manual replies.
+
+    CRM remains the source of truth, but this small local cache prevents a temporary
+    CRM read/write delay from silently turning a non-Italian operator message into
+    Italian. It only records a detected inbound language; it never uses Telegram UI
+    locale or an outbound message to overwrite the customer preference.
+    """
+    normalized = (language or "").split("-", 1)[0].lower()
+    if not re.fullmatch(r"[a-z]{2,3}", normalized):
+        return
+    cache = _load_customer_language_cache()
+    with _customer_language_cache_lock:
+        cache[f"user:{telegram_user_id}"] = normalized
+        cache[f"chat:{telegram_chat_id}"] = normalized
+        try:
+            CUSTOMER_LANGUAGE_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            CUSTOMER_LANGUAGE_CACHE_PATH.write_text(
+                json.dumps(cache, ensure_ascii=False, sort_keys=True), encoding="utf-8"
+            )
+        except OSError as exc:
+            log.warning("Cache lingua locale non disponibile: %s", exc)
+
+
+def cached_customer_language(mapping: dict) -> str:
+    cache = _load_customer_language_cache()
+    for field, prefix in (("telegram_user_id", "user"), ("telegram_chat_id", "chat")):
+        value = mapping.get(field)
+        language = str(cache.get(f"{prefix}:{value}") or "").split("-", 1)[0].lower()
+        if re.fullmatch(r"[a-z]{2,3}", language):
+            return language
+    return ""
 
 
 def is_obvious_short_italian(text: str) -> bool:
@@ -987,8 +1041,9 @@ async def latest_customer_language(mapping: dict) -> str:
     Direct REST reads of CRM tables are intentionally blocked by RLS on the
     public key, which previously made every manual reply fall back to Italian.
     """
+    cached = cached_customer_language(mapping)
     saved = str(mapping.get("language") or "").split("-", 1)[0].lower()
-    language = saved if re.fullmatch(r"[a-z]{2,3}", saved) else "it"
+    language = cached or (saved if re.fullmatch(r"[a-z]{2,3}", saved) else "it")
     log.info("Lingua Topic letta dal CRM autorizzato: %s", language)
     return language
 
