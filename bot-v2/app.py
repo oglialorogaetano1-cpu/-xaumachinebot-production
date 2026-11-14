@@ -2209,24 +2209,18 @@ async def poll_puprime_notifications(app: Application) -> None:
     if not ADMIN_CHAT_ID:
         log.warning("Notifiche PU Prime non attive: ADMIN_CHAT_ID mancante")
         return
-    event_types = "account_opened,allocation_in,allocation_out,copy_activated"
     while True:
         try:
             headers = dict(CRM_HEADERS)
             headers.pop("Prefer", None)
-            params = {
-                "tenant_id": "eq.00000000-0000-4000-8000-000000000001",
-                "notified_at": "is.null",
-                "event_type": f"in.({event_types})",
-                "order": "created_at.asc",
-                "limit": "25",
-                "select": "id,event_type,id_utente,payload,created_at",
-            }
             async with httpx.AsyncClient(timeout=15) as client:
-                response = await client.get(
-                    f"{SUPABASE_URL}/rest/v1/crm_puprime_events",
+                # The events table is deliberately protected by RLS.  Read it
+                # only through the tenant-secret RPC, never through a public
+                # table endpoint with the publishable key.
+                response = await client.post(
+                    f"{SUPABASE_URL}/rest/v1/rpc/crm_pull_puprime_notifications",
                     headers=headers,
-                    params=params,
+                    json={"p_secret": CRM_TRACKING_SECRET, "p_limit": 25},
                 )
                 response.raise_for_status()
                 events = response.json() or []
@@ -2235,11 +2229,10 @@ async def poll_puprime_notifications(app: Application) -> None:
                     if not message:
                         continue
                     await app.bot.send_message(chat_id=int(ADMIN_CHAT_ID), text=message)
-                    marked = await client.patch(
-                        f"{SUPABASE_URL}/rest/v1/crm_puprime_events",
-                        headers={**headers, "Prefer": "return=minimal"},
-                        params={"id": f"eq.{item['id']}"},
-                        json={"notified_at": datetime.now(timezone.utc).isoformat()},
+                    marked = await client.post(
+                        f"{SUPABASE_URL}/rest/v1/rpc/crm_ack_puprime_notification",
+                        headers=headers,
+                        json={"p_secret": CRM_TRACKING_SECRET, "p_event_id": item["id"]},
                     )
                     marked.raise_for_status()
                     log.info("Notifica PU Prime consegnata: %s", item.get("event_type"))
