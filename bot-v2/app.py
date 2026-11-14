@@ -9,6 +9,7 @@ import threading
 import unicodedata
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 import httpx
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, ApplicationHandlerStop, CallbackQueryHandler, ChatJoinRequestHandler, ChatMemberHandler, CommandHandler, MessageHandler, ContextTypes, filters
@@ -54,6 +55,11 @@ AI_TRADER_GUIDE_IT_URL = os.environ.get(
     "https://ai-trader-mt5-checkout.vercel.app/guides/AI_Trader_MT5_Guida_Installazione_IT.pdf",
 ).strip()
 GOOGLE_TRANSLATE_API_KEY = os.environ.get("GOOGLE_TRANSLATE_API_KEY", "").strip()
+CUSTOMER_LANGUAGE_CACHE_PATH = Path(
+    os.environ.get("CUSTOMER_LANGUAGE_CACHE", "/data/customer-language.json")
+)
+_customer_language_cache_lock = threading.Lock()
+_customer_language_cache: dict[str, str] | None = None
 # Il bot clienti dedicato risponde ai nuovi contatti.  Lo stato può comunque
 # essere fermato in modo esplicito dall'amministratore con /ai_spegni.
 # Lasciamo una variabile d'ambiente per disattivarlo senza ridistribuire codice.
@@ -787,6 +793,54 @@ async def crm_store_language(update: Update) -> None:
     return
 
 
+def _load_customer_language_cache() -> dict[str, str]:
+    """Load the language fixed from real inbound text, if it was persisted."""
+    global _customer_language_cache
+    with _customer_language_cache_lock:
+        if _customer_language_cache is not None:
+            return _customer_language_cache
+        try:
+            data = json.loads(CUSTOMER_LANGUAGE_CACHE_PATH.read_text(encoding="utf-8"))
+            _customer_language_cache = data if isinstance(data, dict) else {}
+        except (OSError, ValueError, TypeError):
+            _customer_language_cache = {}
+        return _customer_language_cache
+
+
+def remember_customer_language(telegram_user_id: int, telegram_chat_id: int, language: str) -> None:
+    """Persist the first language detected from a real customer message.
+
+    Telegram's profile locale is only a UI preference.  It must never turn an
+    English customer's manual operator reply into Italian.
+    """
+    language = (language or "").split("-", 1)[0].lower()
+    if not re.fullmatch(r"[a-z]{2,3}", language):
+        return
+    cache = _load_customer_language_cache()
+    with _customer_language_cache_lock:
+        cache[f"user:{telegram_user_id}"] = language
+        cache[f"chat:{telegram_chat_id}"] = language
+        try:
+            CUSTOMER_LANGUAGE_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            CUSTOMER_LANGUAGE_CACHE_PATH.write_text(
+                json.dumps(cache, ensure_ascii=False, sort_keys=True), encoding="utf-8"
+            )
+        except OSError as exc:
+            log.warning("Cache lingua cliente non disponibile: %s", exc)
+
+
+def customer_language_for_topic(mapping: dict) -> str:
+    """Prefer language inferred from text over the CRM/Telegram profile locale."""
+    cache = _load_customer_language_cache()
+    for field, prefix in (("telegram_user_id", "user"), ("telegram_chat_id", "chat")):
+        value = mapping.get(field)
+        cached = str(cache.get(f"{prefix}:{value}") or "").split("-", 1)[0].lower()
+        if re.fullmatch(r"[a-z]{2,3}", cached):
+            return cached
+    saved = str(mapping.get("language") or "").split("-", 1)[0].lower()
+    return saved if re.fullmatch(r"[a-z]{2,3}", saved) else "it"
+
+
 async def crm_set_ai_control(chat_id: int, mode: str) -> dict:
     """Pausa per un'ora, stop permanente o riattivazione della IA per chat."""
     headers = dict(CRM_HEADERS)
@@ -1074,6 +1128,12 @@ async def mirror_text_to_forum(update: Update, direction: str, body: str,
         detected_from_text = await detect_text_language(source_body) if inbound else ""
         italian, translated, detected_language = await google_translate_to_italian(source_body, language)
         detected_language = detected_from_text or detected_language
+        if detected_language and update.effective_user and update.effective_chat:
+            remember_customer_language(
+                update.effective_user.id,
+                update.effective_chat.id,
+                detected_language,
+            )
         # Blocca la lingua alla prima conversazione reale. Il profilo Telegram
         # viene usato soltanto come valore iniziale; dopo la prima rilevazione
         # non deve piu' cambiare se il cliente alterna italiano, inglese o
@@ -1166,10 +1226,10 @@ async def forum_operator_message(update: Update, context: ContextTypes.DEFAULT_T
         return
     try:
         if msg.text:
+            target_language = customer_language_for_topic(mapping)
             body, translated = await google_translate_from_italian(
-                msg.text, str(mapping.get("language") or "it"),
+                msg.text, target_language,
             )
-            target_language = str(mapping.get("language") or "it").split("-", 1)[0].lower()
             if target_language not in ("", "it") and not translated:
                 # Mai inviare italiano a un cliente estero: Google viene
                 # ritentato e poi interviene il fallback AI di sola traduzione.
