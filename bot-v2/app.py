@@ -746,12 +746,15 @@ async def crm_set_customer_language(telegram_user_id: int, language: str) -> Non
 
 
 async def crm_store_language(update: Update) -> None:
-    """Salva la lingua del profilo come primo valore, poi corretta dal testo reale."""
-    user = update.effective_user
-    chat = update.effective_chat
-    if not user or not chat or chat.type != "private" or not user.language_code:
-        return
-    await crm_set_customer_language(user.id, user.language_code)
+    """Compatibilita' storica: non sovrascrivere la lingua bloccata dal testo.
+
+    Il ``language_code`` del profilo Telegram descrive l'app del cliente, non
+    necessariamente la lingua in cui scrive.  Scriverlo ad ogni messaggio
+    faceva oscillare inglese/italiano/spagnolo e rompeva le risposte manuali.
+    La lingua di invio viene quindi inizializzata una sola volta in
+    :func:`mirror_text_to_forum`, dal primo testo reale ricevuto.
+    """
+    return
 
 
 async def crm_set_ai_control(chat_id: int, mode: str) -> dict:
@@ -1022,10 +1025,16 @@ async def mirror_text_to_forum(update: Update, direction: str, body: str,
         detected_from_text = await detect_text_language(source_body) if inbound else ""
         italian, translated, detected_language = await google_translate_to_italian(source_body, language)
         detected_language = detected_from_text or detected_language
-        # La lingua del messaggio reale prevale sul language_code del profilo,
-        # che Telegram lascia spesso impostato in italiano anche per clienti esteri.
+        # Blocca la lingua alla prima conversazione reale. Il profilo Telegram
+        # viene usato soltanto come valore iniziale; dopo la prima rilevazione
+        # non deve piu' cambiare se il cliente alterna italiano, inglese o
+        # spagnolo dentro la stessa chat.
         if inbound and detected_language and update.effective_user:
-            await crm_set_customer_language(update.effective_user.id, detected_language)
+            saved = await crm_topic_lookup(telegram_user_id=update.effective_user.id)
+            saved_language = str(saved.get("language") or "").split("-", 1)[0].lower()
+            profile_language = str(getattr(update.effective_user, "language_code", "") or "").split("-", 1)[0].lower()
+            if not saved_language or saved_language == profile_language:
+                await crm_set_customer_language(update.effective_user.id, detected_language)
         if translated:
             topic_body = f"{source_body}\n\n🇮🇹 Traduzione italiana\n{italian[:1800]}"
     try:
