@@ -982,7 +982,8 @@ async def ensure_customer_topic(update: Update) -> int | None:
             message_thread_id=thread_id,
             text=(f"👤 Nuova conversazione\nNome: {topic_name}\n"
                   f"Username: {username}\nTelegram ID: {user.id}\n\n"
-                  "Rispondi direttamente in questo Topic: il bot inoltrera' il messaggio al cliente."),
+                  "Rispondi direttamente in questo Topic: il bot inoltrera' il messaggio al cliente.\n"
+                  "Comandi: /ferma · /accendi"),
         )
         return thread_id
     except Exception as exc:
@@ -1083,16 +1084,18 @@ async def forum_operator_message(update: Update, context: ContextTypes.DEFAULT_T
         await msg.reply_text("⚠️ Questo Topic non e' ancora collegato a un cliente.")
         return
     command = ((msg.text or "").strip().split(maxsplit=1) or [""])[0].split("@", 1)[0].lower()
-    if command in ("/stop", "/accendi"):
-        mode = "stop" if command == "/stop" else "on"
+    if command in ("/ferma", "/stop", "/accendi"):
+        # /stop resta soltanto un alias compatibile con le vecchie istruzioni.
+        # Nei Topic l'interfaccia ufficiale e' testuale: /ferma e /accendi.
+        mode = "stop" if command in ("/ferma", "/stop") else "on"
         result = await crm_set_ai_control(int(mapping["telegram_chat_id"]), mode)
         if not result.get("ok"):
             await msg.reply_text("⚠️ Non sono riuscito a modificare lo stato dell'IA. Riprova tra poco.")
             return
         if mode == "stop":
-            await msg.reply_text("⛔ IA spenta per questo cliente. Rimarra' ferma finche' non scrivi /accendi.")
+            await msg.reply_text("⛔ IA ferma per questo cliente.")
         else:
-            await msg.reply_text("✅ IA riattivata subito per questo cliente.")
+            await msg.reply_text("✅ IA attiva per questo cliente.")
         return
     if (msg.text or "").startswith("/"):
         return
@@ -1162,9 +1165,10 @@ async def forum_operator_message(update: Update, context: ContextTypes.DEFAULT_T
                 )
             body = msg.caption or "Allegato inviato dall'operatore"
         await crm_record_forum_reply(mapping, body)
-        pause = await crm_set_ai_control(int(mapping["telegram_chat_id"]), "pause_1h")
-        if pause.get("ok"):
-            await msg.reply_text("⏸ IA in pausa per 1 ora. /stop per fermarla, /accendi per riattivarla.")
+        # Dopo una risposta manuale l'IA si mette in pausa per la chat, ma non
+        # inonda il Topic di avvisi o pulsanti. Lo stato si gestisce solo con
+        # /ferma e /accendi quando l'operatore lo desidera.
+        await crm_set_ai_control(int(mapping["telegram_chat_id"]), "pause_1h")
     except Exception as exc:
         log.warning("Risposta Topic -> cliente fallita: %s", exc)
         await msg.reply_text("⚠️ Invio al cliente non riuscito. Riprova tra poco.")
