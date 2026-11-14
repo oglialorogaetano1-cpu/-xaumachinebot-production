@@ -21,7 +21,18 @@ PU_PASSWORD = os.environ.get("PU_PASSWORD", "")
 LOGIN_URL = os.environ.get(
     "PU_LOGIN_URL", "https://myaccount.puprime.com/login"
 )
-IBS = ["23215978", "23217421", "7527073"]
+# The official API identifies accounts and downstream users, but its documented
+# response has no customer-name field.  Names shown in the authenticated IB
+# portal are therefore synchronized separately, as a supplement to (never a
+# replacement for) the official API identity.
+PU_PORTAL_IBS = [
+    value.strip()
+    for value in os.environ.get("PU_PORTAL_IBS", "").split(",")
+    if value.strip()
+]
+PU_PORTAL_NAME_SYNC_ENABLED = os.environ.get(
+    "PU_PORTAL_NAME_SYNC_ENABLED", "true"
+).strip().lower() in {"1", "true", "yes", "on"}
 INTERVAL = int(os.environ.get("SYNC_INTERVAL_SECONDS", "1800"))
 PU_API_BASE_URL = os.environ.get("PU_API_BASE_URL", "https://openapi.puprime.com").rstrip("/")
 PU_API_USER_ID = os.environ.get("PU_API_USER_ID", "").strip()
@@ -532,9 +543,13 @@ async def scrape_once():
     if missing:
         raise RuntimeError(f"missing required worker settings: {','.join(missing)}")
 
-    buckets = {ib: [] for ib in IBS}
-    endpoint_counts = {ib: {} for ib in IBS}
-    active_ib = {"value": IBS[0]}
+    # When no explicit list is configured, read the IB currently selected by
+    # the authenticated portal.  This avoids silently querying obsolete,
+    # hard-coded IB numbers.
+    portal_ibs = PU_PORTAL_IBS or ["current"]
+    buckets = {ib: [] for ib in portal_ibs}
+    endpoint_counts = {ib: {} for ib in portal_ibs}
+    active_ib = {"value": portal_ibs[0]}
     response_tasks = set()
 
     async with async_playwright() as playwright:
@@ -660,13 +675,13 @@ async def scrape_once():
             await dismiss_popups(page)
             event("PU_STAGE", stage="login_ok")
 
-            for ib in IBS:
+            for ib in portal_ibs:
                 active_ib["value"] = ib
                 success = False
                 for attempt in (1, 2):
                     before = len(buckets[ib])
                     event("PU_STAGE", stage="ib_start", ib=ib, attempt=attempt)
-                    switched = await switch_ib(page, ib)
+                    switched = True if ib == "current" else await switch_ib(page, ib)
                     if not switched:
                         event(
                             "PU_STAGE",
@@ -711,7 +726,7 @@ async def scrape_once():
             await browser.close()
 
     all_rows = []
-    for ib in IBS:
+    for ib in portal_ibs:
         all_rows.extend(buckets[ib])
     return buckets, all_rows
 
@@ -740,12 +755,34 @@ async def run_sync():
                 return
             result = await sync_official_api(snapshot)
             updated = int(result.get("accounts", 0))
+            # The public IB API does not contain the human-readable name.
+            # If portal credentials are configured, enrich the exact accounts
+            # from the authenticated portal.  This is name-only enrichment:
+            # balances, deposits and copy status are never inferred from it.
+            portal_updated = 0
+            if PU_PORTAL_NAME_SYNC_ENABLED and PU_EMAIL and PU_PASSWORD:
+                try:
+                    _buckets, portal_rows = await scrape_once()
+                    portal_updated = await upsert_rows(portal_rows)
+                    event(
+                        "PU_PORTAL_NAME_SYNC",
+                        portal_rows=len(portal_rows),
+                        updated=portal_updated,
+                    )
+                except Exception as portal_error:
+                    # The official account sync remains valid if the visual
+                    # portal changes or is temporarily unavailable.
+                    event(
+                        "PU_PORTAL_NAME_SYNC_FAILED",
+                        reason=str(portal_error)[:160],
+                    )
             state["last_status"] = "success"
-            state["last_updated"] = updated
+            state["last_updated"] = updated + portal_updated
             state["last_finished"] = now_iso()
             event(
                 "PU_SYNC_SUCCESS",
                 updated=updated,
+                portal_updated=portal_updated,
                 accounts=len(rows),
                 ib_user_id=PU_API_AFFILIATE_ID,
             )
