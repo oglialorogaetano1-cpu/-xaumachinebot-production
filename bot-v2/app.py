@@ -2697,7 +2697,10 @@ async def post_init(app):
     if configured_forum:
         ACTIVE_SUPPORT_FORUM_CHAT_ID = configured_forum
     log.info("Telegram support Forum configured: %s", bool(support_forum_chat_id()))
-    await clear_legacy_topic_buttons(app)
+    # Non modificare in massa i vecchi messaggi al riavvio: Telegram applica
+    # flood control e può bloccare temporaneamente i nuovi messaggi clienti.
+    # I pulsanti storici restano compatibili; i nuovi Topic usano /ferma e
+    # /accendi e non generano più tastiere inline.
     if CUSTOMER_AUTO_REPLY_ENABLED:
         app.create_task(poll_operator_outbox(app), name="crm-operator-outbox")
         app.create_task(poll_smart_followups(), name="crm-smart-followups")
