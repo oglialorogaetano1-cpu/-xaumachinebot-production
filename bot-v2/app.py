@@ -2642,6 +2642,8 @@ def format_puprime_event(event: dict) -> str | None:
     masked_account = ("••••" + account[-4:]) if len(account) >= 4 else "non disponibile"
     event_type = str(event.get("event_type") or "")
     customer = str(payload.get("customer_name") or event.get("id_utente") or "Cliente non associato")
+    username = str(payload.get("telegram_username") or "").strip().lstrip("@")
+    telegram_line = f"\nTelegram: @{username}" if username else ""
     if event_type == "account_opened":
         details = " · ".join(filter(None, [
             str(payload.get("platform") or "").strip(),
@@ -2650,14 +2652,14 @@ def format_puprime_event(event: dict) -> str | None:
         ]))
         return (
             "✅ Nuovo conto PU Prime registrato\n"
-            f"Cliente: {customer}\nConto: {masked_account}"
+            f"Cliente: {customer}{telegram_line}\nConto: {masked_account}"
             + (f"\n{details}" if details else "")
         )
     if event_type in ("allocation_in", "allocation_out"):
         direction = "entrata" if event_type == "allocation_in" else "uscita"
         return (
             f"🔄 Movimento allocazione PU Prime ({direction})\n"
-            f"Cliente: {customer}\nConto: {masked_account}\n"
+            f"Cliente: {customer}{telegram_line}\nConto: {masked_account}\n"
             "Nota: l’API non certifica deposito/prelievo o importo."
         )
     if event_type == "copy_activated":
@@ -2665,7 +2667,7 @@ def format_puprime_event(event: dict) -> str | None:
         currency = str(payload.get("currency") or "USD").strip()
         amount_line = f"\nImporto verificato nel CRM: {amount} {currency}" if amount is not None else ""
         return (
-            f"🤖 Copy trading attivato\nCliente: {customer}\n"
+            f"🤖 Copy trading attivato\nCliente: {customer}{telegram_line}\n"
             f"Strategia: {payload.get('strategy_name') or 'NEXORA AI'}"
             + amount_line
         )
