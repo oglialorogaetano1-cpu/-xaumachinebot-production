@@ -2749,6 +2749,14 @@ async def post_init(app):
 
 def main():
     threading.Thread(target=start_health_server, daemon=True, name="health-server").start()
+    # This repository is deployed to both the active bot service and the
+    # legacy service.  Keep the legacy service reachable for health checks,
+    # but let its service-specific variable disable Telegram polling so only
+    # one process can consume a bot token at a time.
+    if os.environ.get("TELEGRAM_POLLING_ENABLED", "true").lower() not in {"1", "true", "yes", "on"}:
+        log.warning("Telegram polling disabled for this service")
+        threading.Event().wait()
+        return
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     app.add_error_handler(on_error)
     app.add_handler(MessageHandler(filters.COMMAND & filters.ChatType.PRIVATE, block_customer_commands_in_manual_mode), group=-1)
