@@ -874,6 +874,16 @@ async def detect_text_language(text: str) -> str:
         return ""
 
 
+def is_obvious_short_italian(text: str) -> bool:
+    """Recognise common terse Italian messages without asking an AI model."""
+    normalized = re.sub(r"[^a-zàèéìòóù]+", " ", (text or "").casefold()).strip()
+    return normalized in {
+        "ci sei", "ciao", "ciao ci sei", "come funziona", "cioe",
+        "grazie", "va bene", "ok", "perfetto", "buona sera",
+        "buongiorno", "buonasera", "mi aiuti", "non capisco",
+    }
+
+
 async def ai_translate_text(text: str, source_language: str, target_language: str) -> tuple[str, bool]:
     """Fallback di sola traduzione, separato dal prompt commerciale clienti."""
     source_key = (source_language or "").strip().lower()
@@ -927,8 +937,16 @@ async def google_translate_to_italian(text: str, declared_language: str) -> tupl
     rilevamento della sorgente di Google, senza mai trasformare un errore di
     traduzione in una risposta commerciale.
     """
-    language = (declared_language or "").split("-", 1)[0].lower()
     if not text:
+        return "", False, ""
+    # Non generare mai una "traduzione italiana" per testo italiano o quando
+    # la lingua non è certa. In questi casi il Topic conserva solo l'originale.
+    if is_obvious_short_italian(text):
+        return "", False, "it"
+    language = await detect_text_language(text)
+    if language == "it":
+        return "", False, language
+    if not language:
         return "", False, ""
     if GOOGLE_TRANSLATE_API_KEY:
         try:
@@ -942,10 +960,7 @@ async def google_translate_to_italian(text: str, declared_language: str) -> tupl
                 item = (((response.json().get("data") or {}).get("translations") or [{}])[0])
                 translated = str(item.get("translatedText") or "").strip()
                 source = str(item.get("detectedSourceLanguage") or "").lower()
-                # Google may omit ``detectedSourceLanguage`` on some
-                # responses.  In that case the CRM language is a safer
-                # fallback than silently dropping an English/French message.
-                if translated and (source != "it" or (not source and language not in ("", "it"))):
+                if translated and source != "it":
                     return translated, True, source
                 return "", False, source
             log.warning("Traduzione italiana Google fallita %s: %s", response.status_code, response.text[:200])
@@ -955,7 +970,7 @@ async def google_translate_to_italian(text: str, declared_language: str) -> tupl
     # Never use the commercial assistant as a translation fallback: a failed
     # translation must remain visibly unavailable, not turn into a generic
     # sales answer that looks like an Italian translation in the Topic.
-    italian, translated = await ai_translate_text(text, "auto-detected language", "Italian")
+    italian, translated = await ai_translate_text(text, language, "Italian")
     return (italian, True, language) if translated else ("", False, "")
 
 
