@@ -745,16 +745,13 @@ async def run_sync():
             snapshot = await api_once()
             rows = snapshot["accounts"]
             state["rows_by_ib"] = {PU_API_AFFILIATE_ID or "ib": len(rows)}
-            if not rows:
-                # A valid empty result is permitted by the official API. Do
-                # not overwrite CRM records or report a false success update.
-                state["last_status"] = "success"
-                state["last_updated"] = 0
-                state["last_finished"] = now_iso()
-                event("PU_SYNC_SUCCESS", updated=0, accounts=0)
-                return
-            result = await sync_official_api(snapshot)
-            updated = int(result.get("accounts", 0))
+            # accountData covers accounts approved in the API date window.
+            # An empty window is valid, but must not prevent the authenticated
+            # portal from refreshing names for existing clients.
+            updated = 0
+            if rows:
+                result = await sync_official_api(snapshot)
+                updated = int(result.get("accounts", 0))
             # The public IB API does not contain the human-readable name.
             # If portal credentials are configured, enrich the exact accounts
             # from the authenticated portal.  This is name-only enrichment:
