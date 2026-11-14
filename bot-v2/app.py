@@ -1157,7 +1157,11 @@ async def mirror_text_to_forum(update: Update, direction: str, body: str,
     # I messaggi scritti manualmente dagli operatori restano invece invariati.
     if direction not in ("out", "outbound") or sender_type == "ai":
         italian, translated, detected_language = await google_translate_to_italian(topic_body)
-        if detected_language and detected_language != "ai" and update.effective_user:
+        # Salva la lingua soltanto sul messaggio in entrata del cliente.  Le
+        # risposte dell'AI e la lingua dell'app Telegram non devono mai
+        # riscrivere la lingua fissata dal primo testo reale della chat.
+        if (direction not in ("out", "outbound") and detected_language
+                and detected_language != "ai" and update.effective_user):
             saved = await crm_topic_lookup(telegram_user_id=update.effective_user.id)
             saved_language = str(saved.get("language") or "").split("-", 1)[0].lower()
             profile_language = str(getattr(update.effective_user, "language_code", "") or "").split("-", 1)[0].lower()
@@ -1168,9 +1172,10 @@ async def mirror_text_to_forum(update: Update, direction: str, body: str,
         # Per il cliente italiano non mostrare una seconda copia etichettata
         # come traduzione, nemmeno se il servizio modifica lievemente punteggiatura
         # o maiuscole. La resa italiana serve solo allo staff per lingue estere.
-        is_italian_source = detected_language == "it" or str(
-            getattr(update.effective_user, "language_code", "") or ""
-        ).lower().startswith("it")
+        # Non usare il locale Telegram qui: un cliente può avere l'app in
+        # italiano e scriverci in inglese, francese o spagnolo. Conta solo la
+        # lingua realmente rilevata dal contenuto del messaggio.
+        is_italian_source = detected_language == "it"
         same_text = normalized_for_translation_check(italian) == normalized_for_translation_check(topic_body)
         if (translated and not is_italian_source and not appears_to_be_italian(topic_body)
                 and not same_text):
