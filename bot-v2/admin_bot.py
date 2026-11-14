@@ -13,6 +13,7 @@ import os
 import re
 import sqlite3
 import threading
+import time
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1895,10 +1896,7 @@ async def continuous_improvement(application):
             log.exception("Continuous improvement job failed")
 
 
-def main():
-    init_db()
-    log.info("Starting XAU Machine admin Telegram bot")
-    threading.Thread(target=start_health_server, name="health-server", daemon=True).start()
+def run_bot():
     async def post_init(application):
         me = await application.bot.get_me()
         log.info("Admin Telegram bot connected: @%s; authorized IDs configured: %s", me.username, bool(ADMIN_IDS))
@@ -1958,6 +1956,22 @@ def main():
     app.add_handler(MessageHandler(filters.Document.ALL, prompt_txt_message))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message))
     app.run_polling(drop_pending_updates=False, bootstrap_retries=-1)
+
+
+def main():
+    init_db()
+    threading.Thread(target=start_health_server, name="health-server", daemon=True).start()
+    while True:
+        log.info("Starting XAU Machine admin Telegram bot")
+        try:
+            run_bot()
+        except KeyboardInterrupt:
+            raise
+        except Exception:
+            # Do not let a temporary Telegram API timeout take the health
+            # endpoint down or consume Railway's finite restart budget.
+            log.exception("Admin Telegram bot startup/polling failed; retrying in 10 seconds")
+            time.sleep(10)
 
 
 if __name__ == "__main__":
