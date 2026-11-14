@@ -42,9 +42,10 @@ AI_TRADER_GUIDE_IT_URL = os.environ.get(
     "https://ai-trader-mt5-checkout.vercel.app/guides/AI_Trader_MT5_Guida_Installazione_IT.pdf",
 ).strip()
 GOOGLE_TRANSLATE_API_KEY = os.environ.get("GOOGLE_TRANSLATE_API_KEY", "").strip()
-# L'AI è attiva per le nuove conversazioni. Le pause individuali impostate
-# dall'operatore nei Topic restano valide e non vengono annullate.
-AI_AUTOREPLY_ENABLED = True
+# Arresto precauzionale: le associazioni Topic-cliente sono in verifica.
+# I messaggi restano archiviati, ma nessuna risposta automatica parte finché
+# il mapping non è nuovamente affidabile.
+AI_AUTOREPLY_ENABLED = False
 MT5_SHOWCASE_ENABLED = False
 # Modalita' operatore: nessun flusso automatico verso i clienti. Il bot resta
 # connesso per archiviare i messaggi nei Topic e tradurli per lo staff.
