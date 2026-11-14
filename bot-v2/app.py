@@ -42,10 +42,12 @@ AI_TRADER_GUIDE_IT_URL = os.environ.get(
     "https://ai-trader-mt5-checkout.vercel.app/guides/AI_Trader_MT5_Guida_Installazione_IT.pdf",
 ).strip()
 GOOGLE_TRANSLATE_API_KEY = os.environ.get("GOOGLE_TRANSLATE_API_KEY", "").strip()
-# Arresto precauzionale: le associazioni Topic-cliente sono in verifica.
-# I messaggi restano archiviati, ma nessuna risposta automatica parte finché
-# il mapping non è nuovamente affidabile.
-AI_AUTOREPLY_ENABLED = False
+# Il bot clienti dedicato risponde ai nuovi contatti.  Lo stato può comunque
+# essere fermato in modo esplicito dall'amministratore con /ai_spegni.
+# Lasciamo una variabile d'ambiente per disattivarlo senza ridistribuire codice.
+AI_AUTOREPLY_ENABLED = os.environ.get("AI_AUTOREPLY_ENABLED", "true").strip().lower() in {
+    "1", "true", "yes", "on",
+}
 MT5_SHOWCASE_ENABLED = False
 # Modalita' operatore: nessun flusso automatico verso i clienti. Il bot resta
 # connesso per archiviare i messaggi nei Topic e tradurli per lo staff.
@@ -1001,15 +1003,18 @@ async def ensure_customer_topic(update: Update) -> int | None:
 
 async def mirror_text_to_forum(update: Update, direction: str, body: str,
                                sender_type: str | None = None) -> None:
-    """Specchia nel Topic soltanto le chat dell'account Telegram Business."""
+    """Specchia nel Topic ogni messaggio privato ricevuto dal bot clienti.
+
+    I contatti possono arrivare sia tramite Telegram Business sia direttamente
+    al bot.  In entrambi i casi il Topic usa lo stesso telegram_user_id, quindi
+    una conversazione già esistente viene aggiornata invece di duplicata.
+    """
     forum_chat_id = support_forum_chat_id()
     if not forum_chat_id or not body or not update.effective_chat:
         return
     if update.effective_chat.type != "private":
         return
     if update.effective_user and update.effective_user.is_bot:
-        return
-    if not getattr(update.effective_message, "business_connection_id", None):
         return
     thread_id = await ensure_customer_topic(update)
     if not thread_id:
