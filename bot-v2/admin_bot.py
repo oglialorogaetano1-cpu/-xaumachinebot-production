@@ -20,7 +20,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import Application, CommandHandler, ContextTypes, HTTPXRequest, MessageHandler, filters
 from health_server import start_health_server
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -1903,7 +1903,25 @@ def main():
         log.info("Admin Telegram bot connected: @%s; authorized IDs configured: %s", me.username, bool(ADMIN_IDS))
         application.create_task(continuous_improvement(application), name="continuous-improvement")
 
-    app = Application.builder().token(TOKEN).post_init(post_init).build()
+    # Railway occasionally cannot reach api.telegram.org during a deploy.  The
+    # default bootstrap policy gives up after the first timeout, which leaves
+    # the administrator bot offline until Railway happens to restart it again.
+    # Keep retrying the initial getMe/getUpdates calls and use timeouts that are
+    # appropriate for Telegram long polling instead.
+    telegram_request = HTTPXRequest(
+        connect_timeout=30.0,
+        read_timeout=60.0,
+        write_timeout=30.0,
+        pool_timeout=30.0,
+    )
+    app = (
+        Application.builder()
+        .token(TOKEN)
+        .request(telegram_request)
+        .get_updates_request(telegram_request)
+        .post_init(post_init)
+        .build()
+    )
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("briefing", briefing))
     app.add_handler(CommandHandler("conversazioni", list_conversations))
@@ -1932,7 +1950,7 @@ def main():
     app.add_handler(MessageHandler(filters.PHOTO, photo_message))
     app.add_handler(MessageHandler(filters.Document.ALL, prompt_txt_message))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message))
-    app.run_polling(drop_pending_updates=False)
+    app.run_polling(drop_pending_updates=False, bootstrap_retries=-1)
 
 
 if __name__ == "__main__":
