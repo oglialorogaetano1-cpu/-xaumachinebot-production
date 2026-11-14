@@ -233,7 +233,12 @@ async def crm_decide_manual_payment(review_id: str, approved: bool, reviewer_id:
     except Exception as exc:
         log.warning("Decisione pagamento manuale non disponibile: %s", exc)
         return {}
-CRM_HEADERS = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}", "Content-Type": "application/json", "Prefer": "return=minimal"}
+# New Supabase publishable keys start with `sb_` and are accepted as `apikey`,
+# but are not JWT bearer tokens.  Sending one as Authorization made PostgREST
+# reject otherwise valid CRM RPCs with HTTP 400/401.
+CRM_HEADERS = {"apikey": SUPABASE_KEY, "Content-Type": "application/json", "Prefer": "return=minimal"}
+if SUPABASE_KEY.startswith("eyJ"):
+    CRM_HEADERS["Authorization"] = f"Bearer {SUPABASE_KEY}"
 
 AI_RUNTIME_RULES = """Sei l'assistente commerciale ufficiale di XAU Machine su Telegram.
 Rispondi nella lingua usata dal cliente con tono naturale, semplice e diretto:
