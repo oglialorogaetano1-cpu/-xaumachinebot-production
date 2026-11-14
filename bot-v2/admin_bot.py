@@ -20,7 +20,8 @@ from zoneinfo import ZoneInfo
 
 import httpx
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes, HTTPXRequest, MessageHandler, filters
+from telegram.request import HTTPXRequest
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 from health_server import start_health_server
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -1914,11 +1915,17 @@ def main():
         write_timeout=30.0,
         pool_timeout=30.0,
     )
+    telegram_updates_request = HTTPXRequest(
+        connect_timeout=30.0,
+        read_timeout=60.0,
+        write_timeout=30.0,
+        pool_timeout=30.0,
+    )
     app = (
         Application.builder()
         .token(TOKEN)
         .request(telegram_request)
-        .get_updates_request(telegram_request)
+        .get_updates_request(telegram_updates_request)
         .post_init(post_init)
         .build()
     )
