@@ -2227,6 +2227,12 @@ async def poll_puprime_notifications(app: Application) -> None:
                     headers=headers,
                     json={"p_secret": CRM_TRACKING_SECRET, "p_limit": 25},
                 )
+                if response.status_code >= 300:
+                    log.warning(
+                        "Polling notifiche PU Prime rifiutato %s: %s",
+                        response.status_code,
+                        response.text[:300],
+                    )
                 response.raise_for_status()
                 events = response.json() or []
                 for item in events:
