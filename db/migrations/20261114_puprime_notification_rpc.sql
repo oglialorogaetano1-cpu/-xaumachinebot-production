@@ -20,9 +20,9 @@ declare
   tenant uuid;
   safe_limit integer := greatest(1, least(coalesce(p_limit, 25), 100));
 begin
-  select id into tenant
-  from public.crm_tenants
-  where slug = 'xau-machine' and status not in ('suspended', 'cancelled');
+  select t.id into tenant
+  from public.crm_tenants t
+  where t.slug = 'xau-machine' and t.status not in ('suspended', 'cancelled');
 
   if tenant is null
      or not private.crm_verify_tenant_runtime_secret(
