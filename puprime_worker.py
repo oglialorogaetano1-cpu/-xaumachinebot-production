@@ -24,18 +24,14 @@ LOGIN_URL = os.environ.get(
     # portal.  The active Client/IB portal uses the .pro login entrypoint.
     "PU_LOGIN_URL", "https://myaccount.puprime.pro/login"
 )
-# The official API identifies accounts and downstream users, but its documented
-# response has no customer-name field.  Names shown in the authenticated IB
-# portal are therefore synchronized separately, as a supplement to (never a
-# replacement for) the official API identity.
+# The integration is API-only.  Portal sessions are neither a source of truth
+# nor a supported fallback for customer lookup.
 PU_PORTAL_IBS = [
     value.strip()
     for value in os.environ.get("PU_PORTAL_IBS", "").split(",")
     if value.strip()
 ]
-PU_PORTAL_NAME_SYNC_ENABLED = os.environ.get(
-    "PU_PORTAL_NAME_SYNC_ENABLED", "true"
-).strip().lower() in {"1", "true", "yes", "on"}
+PU_PORTAL_NAME_SYNC_ENABLED = False
 INTERVAL = int(os.environ.get("SYNC_INTERVAL_SECONDS", "1800"))
 PU_API_BASE_URL = os.environ.get("PU_API_BASE_URL", "https://openapi.puprime.com").rstrip("/")
 PU_API_USER_ID = os.environ.get("PU_API_USER_ID", "").strip()
@@ -775,27 +771,11 @@ async def run_sync():
             if rows:
                 result = await sync_official_api(snapshot)
                 updated = int(result.get("accounts", 0))
-            # The public IB API does not contain the human-readable name.
-            # If portal credentials are configured, enrich the exact accounts
-            # from the authenticated portal.  This is name-only enrichment:
-            # balances, deposits and copy status are never inferred from it.
+            # This worker intentionally uses only the official API.  The
+            # legacy browser-based portal sync is disabled even if old
+            # credentials remain configured in the deployment.
             portal_updated = 0
-            if PU_PORTAL_NAME_SYNC_ENABLED and PU_EMAIL and PU_PASSWORD:
-                try:
-                    _buckets, portal_rows = await scrape_once()
-                    portal_updated = await upsert_rows(portal_rows)
-                    event(
-                        "PU_PORTAL_NAME_SYNC",
-                        portal_rows=len(portal_rows),
-                        updated=portal_updated,
-                    )
-                except Exception as portal_error:
-                    # The official account sync remains valid if the visual
-                    # portal changes or is temporarily unavailable.
-                    event(
-                        "PU_PORTAL_NAME_SYNC_FAILED",
-                        reason=str(portal_error)[:160],
-                    )
+            event("PU_PORTAL_NAME_SYNC_DISABLED", source="official_api_only")
             state["last_status"] = "success"
             state["last_updated"] = updated + portal_updated
             state["last_finished"] = now_iso()
