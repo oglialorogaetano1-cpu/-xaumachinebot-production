@@ -1389,11 +1389,13 @@ async def ai_control_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     if action == "stop":
         await query.answer("IA fermata per questo cliente.")
-        confirmation = "⛔ IA sospesa per questo cliente. Per riprenderla premi “✅ Riattiva IA”."
+        confirmation = "⛔ IA ferma per questo cliente. Usa /accendi nel Topic per riattivarla."
     else:
         await query.answer("IA riattivata per questo cliente.")
-        confirmation = "✅ IA riattivata per questo cliente: risponderà ai suoi nuovi messaggi."
-    await message.reply_text(confirmation, reply_markup=ai_control_keyboard())
+        confirmation = "✅ IA attiva per questo cliente."
+    # I vecchi pulsanti restano utilizzabili finché Telegram li mostra, ma non
+    # generiamo più tastiere nuove: il controllo normale è /ferma o /accendi.
+    await message.reply_text(confirmation)
 
 
 
@@ -2710,6 +2712,7 @@ def main():
         app.add_handler(CommandHandler(cmd, fn))
     app.add_handler(ChatJoinRequestHandler(channel_join_request))
     app.add_handler(CallbackQueryHandler(payment_review_callback, pattern=r"^pay:(?:approve|reject):"))
+    app.add_handler(CallbackQueryHandler(ai_control_callback, pattern=r"^ai:(?:stop|on)$"))
     app.add_handler(MessageHandler(filters.ChatType.SUPERGROUP, forum_operator_message), group=1)
     app.add_handler(MessageHandler(filters.PHOTO & filters.ChatType.PRIVATE, payment_screenshot_message))
     app.add_handler(MessageHandler(filters.VOICE & filters.ChatType.PRIVATE, voice_message))
