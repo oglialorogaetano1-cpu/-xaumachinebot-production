@@ -723,15 +723,8 @@ async def crm_topic_save(*, telegram_user_id: int, telegram_chat_id: int,
 
 
 async def crm_store_language(update: Update) -> None:
-    """Salva la lingua Telegram del cliente per le risposte manuali tradotte."""
-    user = update.effective_user
-    chat = update.effective_chat
-    if not user or not chat or chat.type != "private" or not user.language_code:
-        return
-    language = user.language_code.split("-", 1)[0].lower()
-    if not re.fullmatch(r"[a-z]{2,3}", language):
-        return
-    await crm_store_language_code(update, language)
+    """Non sovrascrivere la lingua bloccata dal primo testo reale del cliente."""
+    return
 
 
 async def crm_store_language_code(update: Update, language: str) -> None:
@@ -852,6 +845,37 @@ async def ai_translate_from_italian(text: str, target_language: str) -> tuple[st
         return text, False
 
 
+async def ai_translate_text(text: str, source_language: str, target_language: str) -> tuple[str, bool]:
+    """Fallback di sola traduzione, mai il prompt commerciale clienti."""
+    if not CRM_TRACKING_SECRET or not text.strip():
+        return text, False
+    instructions = (
+        "TRANSLATION ONLY. Translate the user's text from "
+        f"{source_language} into {target_language}. Return only the faithful translation. "
+        "Do not answer the user, add sales text, labels, Markdown, JSON, code, "
+        "explanations or metadata. Preserve URLs, names, numbers and emojis."
+    )
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            r = await client.post(
+                f"{SUPABASE_URL}/functions/v1/crm-ai-chat",
+                headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}", "Content-Type": "application/json"},
+                json={"runtime_secret": CRM_TRACKING_SECRET, "tenant_slug": CRM_TENANT_SLUG,
+                      "instructions": instructions, "input": [{"role": "user", "content": text[:8000]}]},
+            )
+        if r.status_code >= 300:
+            log.warning("Fallback traduzione AI fallito: %s", r.status_code)
+            return text, False
+        translated = str((r.json() or {}).get("text") or "").strip()
+        translated = re.sub(r"^```(?:text)?\\s*|\\s*```$", "", translated, flags=re.IGNORECASE).strip()
+        if not translated or "```" in translated or re.search(r'"(?:intent|reply_text|next_action)"\\s*:', translated):
+            return text, False
+        return translated, True
+    except Exception as exc:
+        log.warning("Fallback traduzione AI non disponibile: %s", exc)
+        return text, False
+
+
 async def google_translate_to_italian(text: str) -> tuple[str, bool, str]:
     """Traduce i messaggi dei clienti per renderli leggibili nel Topic."""
     if not text:
@@ -872,11 +896,13 @@ async def google_translate_to_italian(text: str) -> tuple[str, bool, str]:
             log.warning("Google Translate verso italiano fallito %s: %s", r.status_code, r.text[:200])
         except Exception as exc:
             log.warning("Google Translate verso italiano non disponibile: %s", exc)
-    # Non usare il modello per produrre una traduzione interna: può rispondere
-    # alla domanda anziché tradurla. Lo usiamo soltanto per ricavare un codice
-    # lingua strettamente validato, così le successive risposte manuali dello
-    # staff raggiungono il cliente nella lingua corretta.
-    return text, False, await ai_detect_language(text)
+    # Google non e' configurato nel servizio live: fallback AI strettamente
+    # limitato alla traduzione, senza il prompt commerciale.
+    detected = await ai_detect_language(text) or obvious_message_language(text)
+    if detected == "it":
+        return text, False, detected
+    italian, translated = await ai_translate_text(text, detected or "auto-detected language", "Italian")
+    return italian, translated, detected
 
 
 async def ai_detect_language(text: str) -> str:
@@ -1009,14 +1035,6 @@ def topic_identity_name(user) -> str:
     return re.sub(r"\s+", " ", f"{identity} · {flag} {location}").strip()[:120]
 
 
-def ai_control_keyboard() -> InlineKeyboardMarkup:
-    """Controls that always apply to the customer of the current Topic."""
-    return InlineKeyboardMarkup([[
-        InlineKeyboardButton("⛔ Ferma IA", callback_data="ai:stop"),
-        InlineKeyboardButton("✅ Riattiva IA", callback_data="ai:on"),
-    ]])
-
-
 async def ensure_customer_topic(update: Update) -> int | None:
     """Crea un Topic per il cliente, riusando sempre quello gia' salvato."""
     forum_chat_id = support_forum_chat_id()
@@ -1062,13 +1080,38 @@ async def ensure_customer_topic(update: Update) -> int | None:
             text=(f"👤 Nuova conversazione\nNome: {topic_name}\n"
                   f"Username: {username}\nTelegram ID: {user.id}\n\n"
                   "Rispondi direttamente in questo Topic: il bot inoltrera' il messaggio al cliente.\n"
-                  "Usa i pulsanti qui sotto per fermare o riattivare l'IA."),
-            reply_markup=ai_control_keyboard(),
+                  "Comandi: /ferma · /accendi"),
         )
         return thread_id
     except Exception as exc:
         log.warning("Creazione Topic Telegram fallita: %s", exc)
         return None
+
+
+LEGACY_TOPIC_BUTTON_MESSAGE_IDS = (
+    568, 587, 589, 590, 591, 596, 599, 600, 601, 602, 604,
+    621, 625, 631, 632, 637, 638, 640, 643, 649, 650,
+)
+
+
+async def clear_legacy_topic_buttons(app) -> None:
+    """Rimuove la tastiera dai messaggi storici del Topic, senza eliminarli."""
+    forum_chat_id = support_forum_chat_id()
+    if not forum_chat_id:
+        return
+    removed = 0
+    for message_id in LEGACY_TOPIC_BUTTON_MESSAGE_IDS:
+        try:
+            await app.bot.edit_message_reply_markup(
+                chat_id=int(forum_chat_id), message_id=message_id, reply_markup=None,
+            )
+            removed += 1
+        except Exception as exc:
+            # Messaggi gia' ripuliti o non appartenenti a questo bot sono innocui.
+            if "message is not modified" not in str(exc).lower():
+                log.info("Pulizia pulsanti storici %s ignorata: %s", message_id, exc)
+    if removed:
+        log.info("Pulsanti storici rimossi: %s", removed)
 
 
 def appears_to_be_italian(text: str) -> bool:
@@ -1114,8 +1157,14 @@ async def mirror_text_to_forum(update: Update, direction: str, body: str,
     # I messaggi scritti manualmente dagli operatori restano invece invariati.
     if direction not in ("out", "outbound") or sender_type == "ai":
         italian, translated, detected_language = await google_translate_to_italian(topic_body)
-        if detected_language and detected_language != "ai":
-            await crm_store_language_code(update, detected_language)
+        if detected_language and detected_language != "ai" and update.effective_user:
+            saved = await crm_topic_lookup(telegram_user_id=update.effective_user.id)
+            saved_language = str(saved.get("language") or "").split("-", 1)[0].lower()
+            profile_language = str(getattr(update.effective_user, "language_code", "") or "").split("-", 1)[0].lower()
+            # Il primo testo reale prevale sul locale Telegram; poi la lingua
+            # resta fissata anche se il cliente alterna italiano e spagnolo.
+            if not saved_language or saved_language == profile_language:
+                await crm_store_language_code(update, detected_language)
         # Per il cliente italiano non mostrare una seconda copia etichettata
         # come traduzione, nemmeno se il servizio modifica lievemente punteggiatura
         # o maiuscole. La resa italiana serve solo allo staff per lingue estere.
@@ -1137,7 +1186,6 @@ async def mirror_text_to_forum(update: Update, direction: str, body: str,
             message_thread_id=thread_id,
             text=f"{label}\n{topic_body}",
             disable_web_page_preview=True,
-            reply_markup=ai_control_keyboard(),
         )
     except Exception as exc:
         log.warning("Inoltro testo al Topic fallito: %s", exc)
@@ -1242,18 +1290,16 @@ async def forum_operator_message(update: Update, context: ContextTypes.DEFAULT_T
         await msg.reply_text("⚠️ Questo Topic non e' ancora collegato a un cliente.")
         return
     command = ((msg.text or "").strip().split(maxsplit=1) or [""])[0].split("@", 1)[0].lower()
-    if command in ("/stop", "/accendi", "/toggle_auto_reply"):
-        # /toggle_auto_reply is deliberately an explicit re-enable command:
-        # it never switches an active customer off by mistake.
-        mode = "stop" if command == "/stop" else "on"
+    if command in ("/ferma", "/stop", "/accendi"):
+        mode = "stop" if command in ("/ferma", "/stop") else "on"
         result = await crm_set_ai_control(int(mapping["telegram_chat_id"]), mode)
         if not result.get("ok"):
             await msg.reply_text("⚠️ Non sono riuscito a modificare lo stato dell'IA. Riprova tra poco.")
             return
         if mode == "stop":
-            await msg.reply_text("⛔ IA sospesa per questo cliente. Per riattivarla usa /toggle_auto_reply in questo Topic.")
+            await msg.reply_text("⛔ IA ferma per questo cliente.")
         else:
-            await msg.reply_text("✅ IA riattivata per questo cliente. Rispondera' ai suoi nuovi messaggi.")
+            await msg.reply_text("✅ IA attiva per questo cliente.")
         return
     if (msg.text or "").startswith("/"):
         return
@@ -2623,6 +2669,7 @@ async def post_init(app):
     if configured_forum:
         ACTIVE_SUPPORT_FORUM_CHAT_ID = configured_forum
     log.info("Telegram support Forum configured: %s", bool(support_forum_chat_id()))
+    await clear_legacy_topic_buttons(app)
     if CUSTOMER_AUTO_REPLY_ENABLED:
         app.create_task(poll_operator_outbox(app), name="crm-operator-outbox")
         app.create_task(poll_smart_followups(), name="crm-smart-followups")
@@ -2636,7 +2683,6 @@ def main():
     for cmd, fn in {"start":start,"help":help_cmd,"registrazione":registration,"verifica_ib":verify_ib,"deposito":deposit,"guida_bot":guide,"screenshot":screenshot,"intervento_umano":human,"attiva_supporto":activate_support_forum,"statistiche_canale":channel_stats}.items():
         app.add_handler(CommandHandler(cmd, fn))
     app.add_handler(ChatJoinRequestHandler(channel_join_request))
-    app.add_handler(CallbackQueryHandler(ai_control_callback, pattern=r"^ai:(?:stop|on)$"))
     app.add_handler(CallbackQueryHandler(payment_review_callback, pattern=r"^pay:(?:approve|reject):"))
     app.add_handler(MessageHandler(filters.ChatType.SUPERGROUP, forum_operator_message), group=1)
     app.add_handler(MessageHandler(filters.PHOTO & filters.ChatType.PRIVATE, payment_screenshot_message))
