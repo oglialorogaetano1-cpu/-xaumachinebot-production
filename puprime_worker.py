@@ -403,9 +403,12 @@ async def upsert_rows(rows):
         deposit_date = str(
             field(item, "lastDepositTime", "lastDepositDate") or ""
         ).strip()[:10]
+        # Some portal responses wrap a name in quote characters.  Preserve
+        # internal apostrophes (for example D'Angelo), but never persist a
+        # stray leading/trailing quote that would break an exact CRM lookup.
         name = str(
             field(item, "name", "userName", "clientName", "customerName") or ""
-        ).strip()
+        ).strip().strip("'\"").strip()
 
         current = merged.setdefault(account, {"numero_conto": account})
         for source, target in (
