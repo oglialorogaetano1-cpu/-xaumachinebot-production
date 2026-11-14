@@ -6,6 +6,7 @@ import logging
 import re
 import secrets
 import threading
+import unicodedata
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import httpx
@@ -1552,7 +1553,32 @@ async def crm_puprime_context(update: Update, candidate_text: str = "") -> dict:
             log.warning("PU Prime lookup %s: %s", r.status_code, r.text[:300])
             return {"status": "unavailable"}
         data = r.json()
-        return data if isinstance(data, dict) else {"status": "unavailable"}
+        result = data if isinstance(data, dict) else {"status": "unavailable"}
+        # The IB portal may show a name without accents while a customer types
+        # the same name with accents (for example Vetro/Vetrò). Retry only a
+        # failed lookup with a Unicode-normalized candidate; IDs and account
+        # numbers remain unchanged.
+        normalized = "".join(
+            char for char in unicodedata.normalize("NFKD", candidate_text or "")
+            if not unicodedata.combining(char)
+        ).strip()
+        if (
+            result.get("status") not in {"matched", "ambiguous", "unavailable"}
+            and normalized
+            and normalized != (candidate_text or "").strip()
+        ):
+            payload["p_candidate"] = normalized[:500]
+            async with httpx.AsyncClient(timeout=12) as client:
+                retry = await client.post(
+                    f"{SUPABASE_URL}/rest/v1/rpc/crm_puprime_lookup",
+                    headers=headers,
+                    json=payload,
+                )
+            if retry.status_code < 300:
+                retry_data = retry.json()
+                if isinstance(retry_data, dict):
+                    return retry_data
+        return result
     except Exception as exc:
         log.warning("PU Prime lookup non disponibile: %s", exc)
         return {"status": "unavailable"}
