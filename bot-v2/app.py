@@ -270,6 +270,10 @@ Segui il prompt commerciale del CRM e usa lo storico della conversazione.
 Non proporre, suggerire o inviare storico, screenshot, accesso Investor/MT5 o
 periodi di performance. Mantieni la conversazione sull'iscrizione, sulla
 configurazione corretta del conto e sul prossimo passaggio richiesto dal cliente.
+Non nominare la strategia, il suo nome commerciale o il suo codice prima che il
+cliente risulti verificato nei dati PU Prime. Prima della verifica parla soltanto
+di "strategia di copy trading". Non citare percentuali di rendimento, target
+giornalieri o simulazioni di guadagno.
 Non inventare verifiche IB, depositi, risultati, saldi o rendimenti e non promettere guadagni.
 Non aggiungere automaticamente disclaimer sul rischio, avvertenze generiche sul trading o
 promemoria sullo stop loss. Parlane soltanto se il cliente chiede esplicitamente informazioni
@@ -291,7 +295,8 @@ richiesta esplicitamente. Non usare markdown, asterischi, elenchi, JSON, codice,
 nomi di funzioni, termini da programmatore, riferimenti a prompt, AI, strumenti,
 policy, traduzioni, log, dati mancanti o istruzioni interne. Non proporre storico,
 MT5, Investor, screenshot o periodi di risultati. Non fingere di essere una persona
-e non inventare dati o conferme."""
+e non inventare dati o conferme. Non citare il nome/codice della strategia a un
+cliente non verificato e non citare percentuali di rendimento o target giornalieri."""
 
 BROKER_ROUTING_RULES = f"""GESTIONE BROKER E BONUS:
 - Prima di proporre un broker, chiedi se il cliente possiede gia' un conto PU Prime o Ultima Markets, a meno che lo abbia gia' detto.
@@ -985,11 +990,10 @@ async def google_translate_to_italian(text: str, declared_language: str) -> tupl
         except Exception as exc:
             log.warning("Traduzione italiana Google non disponibile: %s", exc)
 
-    # Never use the commercial assistant as a translation fallback: a failed
-    # translation must remain visibly unavailable, not turn into a generic
-    # sales answer that looks like an Italian translation in the Topic.
-    italian, translated = await ai_translate_text(text, language, "Italian")
-    return (italian, True, language) if translated else ("", False, "")
+    # Una traduzione interna deve essere verificabile. Se Google non risponde,
+    # lasciamo soltanto l'originale: un modello conversazionale non deve mai
+    # trasformare un errore in una finta traduzione o in una risposta commerciale.
+    return "", False, language
 
 
 async def ensure_customer_topic(update: Update) -> int | None:
@@ -1057,9 +1061,11 @@ async def mirror_text_to_forum(update: Update, direction: str, body: str,
         "🧑‍💼 Operatore" if sender_type == "human" else "🤖 Assistente"
     )
     topic_body = body[:3900]
-    # Nel Topic interno conserviamo l'originale e, per cliente e AI, anche
-    # l'italiano. La traduzione non viene mai inviata al cliente.
-    if inbound or sender_type == "ai":
+    # Nel Topic interno traduciamo soltanto i messaggi in entrata del cliente.
+    # Le risposte dell'assistente restano nella lingua realmente inviata al
+    # cliente: aggiungere una seconda versione italiana le faceva sembrare una
+    # risposta o un suggerimento non inviato.
+    if inbound:
         source_body = body[:1800]
         language = str(getattr(update.effective_user, "language_code", "") or "")
         # Salva la lingua del testo reale prima della traduzione. Questo evita
@@ -1076,7 +1082,14 @@ async def mirror_text_to_forum(update: Update, direction: str, body: str,
             saved = await crm_topic_lookup(telegram_user_id=update.effective_user.id)
             saved_language = str(saved.get("language") or "").split("-", 1)[0].lower()
             profile_language = str(getattr(update.effective_user, "language_code", "") or "").split("-", 1)[0].lower()
-            if not saved_language or saved_language == profile_language:
+            # Il profilo Telegram e' soltanto un valore iniziale. Correggilo
+            # una sola volta quando il primo messaggio reale mostra una lingua
+            # diversa; dopo, la lingua resta bloccata anche se il cliente
+            # alterna idiomi nella conversazione.
+            if not saved_language or (
+                saved_language == profile_language
+                and detected_language != profile_language
+            ):
                 await crm_set_customer_language(update.effective_user.id, detected_language)
         if translated:
             topic_body = f"{source_body}\n\n🇮🇹 Traduzione italiana\n{italian[:1800]}"
@@ -1689,7 +1702,15 @@ async def genera_risposta_ai(testo: str, contesto: dict) -> tuple[str, dict]:
     prompt_crm = (contesto.get("prompt") or "").strip()
     instructions = AI_RUNTIME_RULES
     instructions += "\n\n" + await sala_segnali_contesto_ai()
-    instructions += "\n\n" + puprime_prompt_context(contesto.get("puprime") or {})
+    # Il controllo PU Prime e' un dato puntuale, non il contesto predefinito
+    # di ogni conversazione. Aggiungerlo anche per un semplice "hello" portava
+    # il modello a parlare di verifiche inesistenti o non disponibili.
+    puprime = contesto.get("puprime")
+    if isinstance(puprime, dict) and puprime.get("status"):
+        instructions += "\n\n" + puprime_prompt_context(puprime)
+    customer_language = str(contesto.get("customer_language") or "").split("-", 1)[0].lower()
+    if customer_language:
+        instructions += f"\n\nLINGUA VINCOLATA DEL CLIENTE: {customer_language}. Rispondi soltanto in questa lingua."
     if prompt_crm:
         instructions += "\n\nPROMPT COMMERCIALE ATTIVO DAL CRM:\n" + prompt_crm
     instructions += "\n\n" + BROKER_ROUTING_RULES
@@ -1732,7 +1753,41 @@ async def genera_risposta_ai(testo: str, contesto: dict) -> tuple[str, dict]:
             metadati.get("intent"), metadati.get("stage"),
             metadati.get("should_escalate"), metadati.get("follow_up_type"),
         )
-    return risposta, metadati
+    return enforce_customer_reply_rules(risposta, puprime, customer_language), metadati
+
+
+def enforce_customer_reply_rules(reply: str, puprime: dict | None, language: str) -> str:
+    """Last deterministic barrier for client-facing text.
+
+    Prompt rules are useful but not sufficient: this runs after the model and
+    prevents early strategy disclosure and prohibited performance/showcase
+    offers from reaching a customer when an old CRM prompt contradicts them.
+    """
+    text = (reply or "").strip()
+    status = str((puprime or {}).get("status") or "")
+    if status != "matched":
+        text = re.sub(
+            r"\bNEXORA(?:\s+AI)?(?:\s+CLAUDE)?(?:\s+\d+)?\b",
+            "the copy-trading strategy" if language == "en" else "la strategia di copy trading",
+            text,
+            flags=re.IGNORECASE,
+        )
+    prohibited = re.compile(
+        r"\b(?:historical|history|historic|storico|storica|MT5|MetaTrader|Investor|"
+        r"screenshot|screen\s*shot|5\s*%|10\s*%|per\s+day|al\s+giorno)\b",
+        flags=re.IGNORECASE,
+    )
+    if prohibited.search(text):
+        if language == "en":
+            return (
+                "It is an automatic copy-trading service on the broker platform, and the account remains in your name. "
+                "Tell me whether you already have a PU Prime or Ultima Markets account and I’ll guide you through the next step."
+            )
+        return (
+            "È un servizio di copy trading automatico sulla piattaforma del broker e il conto resta intestato a te. "
+            "Dimmi se hai già un conto PU Prime o Ultima Markets e ti guido nel prossimo passaggio."
+        )
+    return text
 
 
 async def notify_admin_handoff(update: Update, customer_text: str, reason: str) -> bool:
@@ -1781,6 +1836,25 @@ def sembra_nominativo_puprime(testo: str) -> bool:
         "sono", "gia", "registrato", "registrata", "fatto", "grazie", "perche",
     }
     return not any(p.lower() in esclusioni for p in parole)
+
+
+def richiede_verifica_puprime(testo: str) -> bool:
+    """Return True only when the customer is actually asking for an IB lookup.
+
+    The old flow queried PU Prime for every message. A normal English sales
+    question therefore injected a "not found" result into the model context.
+    """
+    normalized = re.sub(r"\s+", " ", (testo or "").casefold()).strip()
+    if sembra_nominativo_puprime(testo):
+        return True
+    if re.search(r"\b\d{5,}\b", normalized):
+        return True
+    verification_terms = (
+        "pu prime", "puprime", "ib", "registered", "registration", "verify",
+        "verification", "linked", "account number", "user id", "numero conto",
+        "id utente", "registrato", "registrata", "verifica", "collegato", "collegata",
+    )
+    return any(term in normalized for term in verification_terms)
 
 async def track_start(update: Update, deep_link_code: str):
     if not CRM_TRACKING_SECRET or not update.effective_user or not update.effective_chat:
@@ -1988,24 +2062,30 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await richiedi_screenshot_mt5(update, context, periodo, testo)
         return
     contesto = await record_message(update, "in", testo, "lead")
-    contesto["puprime"] = await crm_puprime_context(update, testo)
-    esito_puprime = str(contesto["puprime"].get("status") or "not_found")
+    mapping = await crm_topic_lookup(telegram_user_id=update.effective_user.id) if update.effective_user else {}
+    contesto["customer_language"] = str(mapping.get("language") or "").split("-", 1)[0].lower()
+    verifica_puprime = richiede_verifica_puprime(testo)
+    if verifica_puprime:
+        contesto["puprime"] = await crm_puprime_context(update, testo)
+    esito_puprime = str((contesto.get("puprime") or {}).get("status") or "")
     # A bare name is a request for a factual IB lookup. Do not delegate it to
     # the model: it used to hallucinate a completed operator handoff when no
     # real lookup match (or notification) existed.
     if sembra_nominativo_puprime(testo):
         if esito_puprime == "not_found":
             risposta_lookup = (
-                "Con questo nome al momento non risulti collegato al nostro IB. "
-                "Se puoi, inviami il numero conto o l'ID utente PU Prime e controllo quello."
+                "I can’t find this name linked to our IB at the moment. Please send your PU Prime account number or user ID and I’ll check that."
+                if contesto["customer_language"] == "en" else
+                "Con questo nome al momento non risulti collegato al nostro IB. Se puoi, inviami il numero conto o l'ID utente PU Prime e controllo quello."
             )
             await msg.reply_text(risposta_lookup)
             await record_message(update, "out", risposta_lookup, "ai")
             return
         if esito_puprime == "unavailable":
             risposta_lookup = (
-                "La verifica PU Prime non è disponibile in questo momento. "
-                "Riprova tra poco oppure inviami il numero conto o l'ID utente."
+                "PU Prime verification is temporarily unavailable. Please try again shortly or send your account number or user ID."
+                if contesto["customer_language"] == "en" else
+                "La verifica PU Prime non è disponibile in questo momento. Riprova tra poco oppure inviami il numero conto o l'ID utente."
             )
             await msg.reply_text(risposta_lookup)
             await record_message(update, "out", risposta_lookup, "ai")
