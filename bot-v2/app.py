@@ -976,14 +976,19 @@ async def ai_translate_text(text: str, source_language: str, target_language: st
         "Preserve URLs, numbers, names and emojis."
     )
     try:
+        headers = {
+            "apikey": SUPABASE_KEY,
+            "Content-Type": "application/json",
+        }
+        # Publishable `sb_` keys authenticate through `apikey` only.  Sending
+        # them as bearer tokens makes the protected Edge Function reject an
+        # otherwise valid translation request.
+        if SUPABASE_KEY.startswith("eyJ"):
+            headers["Authorization"] = f"Bearer {SUPABASE_KEY}"
         async with httpx.AsyncClient(timeout=18) as client:
             response = await client.post(
                 f"{SUPABASE_URL}/functions/v1/crm-ai-chat",
-                headers={
-                    "apikey": SUPABASE_KEY,
-                    "Authorization": f"Bearer {SUPABASE_KEY}",
-                    "Content-Type": "application/json",
-                },
+                headers=headers,
                 json={
                     "runtime_secret": CRM_TRACKING_SECRET,
                     "tenant_slug": CRM_TENANT_SLUG,
