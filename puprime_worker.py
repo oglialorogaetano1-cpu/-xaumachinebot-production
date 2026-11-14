@@ -19,7 +19,10 @@ SUPABASE_WORKER_SECRET = os.environ.get("SUPABASE_WORKER_SECRET", "")
 PU_EMAIL = os.environ.get("PU_EMAIL", "")
 PU_PASSWORD = os.environ.get("PU_PASSWORD", "")
 LOGIN_URL = os.environ.get(
-    "PU_LOGIN_URL", "https://myaccount.puprime.com/login"
+    # The legacy .com endpoint currently presents a certificate for another
+    # host, which makes automated browser login fail before reaching the IB
+    # portal.  The active Client/IB portal uses the .pro login entrypoint.
+    "PU_LOGIN_URL", "https://myaccount.puprime.pro/login"
 )
 # The official API identifies accounts and downstream users, but its documented
 # response has no customer-name field.  Names shown in the authenticated IB
