@@ -39,6 +39,10 @@ MT5_INVESTOR_BROKER = os.environ.get("MT5_INVESTOR_BROKER", "")
 MT5_INVESTOR_SERVER = os.environ.get("MT5_INVESTOR_SERVER", "")
 MT5_INVESTOR_LOGIN = os.environ.get("MT5_INVESTOR_LOGIN", "")
 MT5_INVESTOR_PASSWORD = os.environ.get("MT5_INVESTOR_PASSWORD", "")
+# This remains deliberately off until a dedicated customer-facing account is
+# supplied and the administrator explicitly enables it.  It prevents both
+# automatic offers and accidental credential disclosure.
+SHOWCASE_ACCESS_ENABLED = os.environ.get("SHOWCASE_ACCESS_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
 AI_TRADER_DELIVERY_FILE = os.path.join(
     os.path.dirname(__file__), "assets", "AI_Trader_MT5_Commercial_Delivery.zip"
 )
@@ -1930,7 +1934,7 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text(risposta)
         await record_message(update, "out", risposta, "ai")
         return
-    if MT5_SHOWCASE_ENABLED and not richiesta_composta and chiede_credenziali_investor_mt5(testo):
+    if SHOWCASE_ACCESS_ENABLED and not richiesta_composta and chiede_credenziali_investor_mt5(testo):
         risposta_credenziali = testo_credenziali_investor_mt5()
         await record_message(update, "in", testo, "lead")
         if risposta_credenziali:
@@ -1949,12 +1953,13 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text(risposta_errore)
             await record_message(update, "out", risposta_errore, "ai")
         return
-    if MT5_SHOWCASE_ENABLED and context.user_data.pop("awaiting_mt5_period", False):
+    awaiting_mt5_period = context.user_data.pop("awaiting_mt5_period", False)
+    if SHOWCASE_ACCESS_ENABLED and awaiting_mt5_period:
         periodo_risposta = estrai_periodo_mt5(testo)
         if periodo_risposta:
             await richiedi_screenshot_mt5(update, context, periodo_risposta, testo)
             return
-    periodo = None if (richiesta_composta or not MT5_SHOWCASE_ENABLED) else rileva_richiesta_screenshot(testo)
+    periodo = None if (richiesta_composta or not SHOWCASE_ACCESS_ENABLED) else rileva_richiesta_screenshot(testo)
     if periodo == PERIODO_DA_CHIEDERE:
         context.user_data["awaiting_mt5_period"] = True
         domanda = "Certo 📊 Quale periodo desideri vedere?"
@@ -1997,7 +2002,7 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await notify_admin_handoff(update, testo, reason)
     next_action = str(metadati.get("next_action") or "")
-    if next_action.startswith("request_mt5_snapshot:"):
+    if SHOWCASE_ACCESS_ENABLED and next_action.startswith("request_mt5_snapshot:"):
         periodo_ai = estrai_periodo_mt5(next_action.split(":", 1)[1])
         if not periodo_ai:
             valore = next_action.split(":", 1)[1].strip()
