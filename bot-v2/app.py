@@ -1135,7 +1135,8 @@ def normalized_for_translation_check(text: str) -> str:
 
 
 async def mirror_text_to_forum(update: Update, direction: str, body: str,
-                               sender_type: str | None = None) -> None:
+                               sender_type: str | None = None,
+                               locked_customer_language: str = "") -> None:
     """Specchia nel Topic soltanto le chat dell'account Telegram Business."""
     forum_chat_id = support_forum_chat_id()
     if not forum_chat_id or not body or not update.effective_chat:
@@ -1160,15 +1161,14 @@ async def mirror_text_to_forum(update: Update, direction: str, body: str,
         # Salva la lingua soltanto sul messaggio in entrata del cliente.  Le
         # risposte dell'AI e la lingua dell'app Telegram non devono mai
         # riscrivere la lingua fissata dal primo testo reale della chat.
-        if (direction not in ("out", "outbound") and detected_language
-                and detected_language != "ai" and update.effective_user):
-            saved = await crm_topic_lookup(telegram_user_id=update.effective_user.id)
-            saved_language = str(saved.get("language") or "").split("-", 1)[0].lower()
-            profile_language = str(getattr(update.effective_user, "language_code", "") or "").split("-", 1)[0].lower()
-            # Il primo testo reale prevale sul locale Telegram; poi la lingua
-            # resta fissata anche se il cliente alterna italiano e spagnolo.
-            if not saved_language or saved_language == profile_language:
-                await crm_store_language_code(update, detected_language)
+        if direction not in ("out", "outbound") and update.effective_user:
+            # La cronologia CRM ci consente di correggere anche Topic nati
+            # prima della regola: la lingua e' sempre quella del primo vero
+            # messaggio del cliente, non il locale dell'app e non l'ultimo
+            # messaggio ricevuto.
+            language_to_lock = locked_customer_language or detected_language
+            if language_to_lock and language_to_lock != "ai":
+                await crm_store_language_code(update, language_to_lock)
         # Per il cliente italiano non mostrare una seconda copia etichettata
         # come traduzione, nemmeno se il servizio modifica lievemente punteggiatura
         # o maiuscole. La resa italiana serve solo allo staff per lingue estere.
@@ -1807,7 +1807,28 @@ async def record_message(update: Update, direction="in", body: str | None = None
             log.warning("CRM bot message %s: %s", r.status_code, r.text[:300])
             return {}
         result = r.json() or {}
-        await mirror_text_to_forum(update, direction, body or "", sender_type)
+        first_customer_language = ""
+        if direction not in ("out", "outbound"):
+            # Il CRM restituisce lo storico della conversazione. Troviamo il
+            # primo messaggio umano significativo e ne fissiamo la lingua:
+            # English -> poi italiano/spagnolo resta English, e viceversa.
+            first_text = ""
+            for item in result.get("history") or []:
+                if item.get("role") != "user":
+                    continue
+                candidate = str(item.get("content") or "").strip()
+                if candidate and not candidate.startswith("/") and not candidate.startswith("["):
+                    first_text = candidate
+                    break
+            if first_text:
+                if first_text == (body or "").strip():
+                    first_customer_language = await ai_detect_language(first_text) or obvious_message_language(first_text)
+                else:
+                    first_customer_language = await ai_detect_language(first_text) or obvious_message_language(first_text)
+        await mirror_text_to_forum(
+            update, direction, body or "", sender_type,
+            locked_customer_language=first_customer_language,
+        )
         return result
     except Exception as exc:
         log.warning("CRM bot message non disponibile: %s", exc)
