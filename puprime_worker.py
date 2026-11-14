@@ -157,7 +157,7 @@ def normalize_official_api(account_rows, commission_rows, allocation_rows):
         account = str(item.get("account") or "").strip()
         if not account:
             continue
-        rows[account] = {
+        row = {
             "numero_conto": account,
             "id_utente": str(item.get("userId") or "").strip(),
             "affiliate_id": PU_API_AFFILIATE_ID,
@@ -166,6 +166,20 @@ def normalize_official_api(account_rows, commission_rows, allocation_rows):
             "tipo_conto": str(item.get("accountType") or "").strip(),
             "attivo": True,
         }
+        # The official endpoint normally documents only account identity, but
+        # some PU Prime accounts include a display name.  Preserve it when
+        # supplied so name lookup keeps working even while the optional portal
+        # enrichment is unavailable.
+        name = str(
+            item.get("name")
+            or item.get("userName")
+            or item.get("clientName")
+            or item.get("customerName")
+            or ""
+        ).strip()
+        if name:
+            row["nome"] = name[:200]
+        rows[account] = row
     for item in commission_rows:
         account = str(item.get("account") or "").strip()
         if not account:
