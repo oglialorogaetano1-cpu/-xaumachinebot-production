@@ -317,6 +317,63 @@ PU_PRIME_NOT_FOUND = (
     "Hai scritto bene nome e cognome?"
 )
 
+PU_PRIME_GUIDE_IT = """✅ GUIDA UFFICIALE PU PRIME – COPY TRADING
+
+⚠️ PRIMA DI INIZIARE
+Seleziona esattamente:
+👉 Copy Popular Trading
+👉 Tipo conto: Standard
+👉 Valuta: EUR o valuta locale
+❗ Tipo conto sbagliato = il bot non si attiva
+
+🎁 BONUS — PRIMA DI DEPOSITARE
+Nuovo cliente: bonus 100%. Cliente esistente: bonus 20%.
+
+• Vai su Promozioni → attiva prima di depositare
+Esempio: 1.000€ → operi con 2.000€
+📌 Il bonus non può essere prelevato — solo i profitti generati da esso.
+
+💳 DEPOSITO
+• Inserisci importo — nessun voucher — conferma pagamento
+❗ Solo sul conto Copy Popular Trading Standard
+
+🤖 ATTIVAZIONE BOT
+
+NEXORA AI
+ID strategia: B10175523
+
+⚙️ Copy Mode → Equivalent Used Margin
+⚙️ Investment → 100% del capitale totale
+⚙️ Used Margin Equivalent → 1
+⚙️ Stop Loss → 95%
+⚙️ Take Profit → Off
+☑ Conferma
+
+📊 MONITORAGGIO
+Solo app PU Prime. Non MT4 o MT5.
+
+💸 PRELIEVI
+👉 Bot → Gestisci → Rimuovi fondi → Inserisci importo
+📌 Orario consigliato: intorno alle 22:00 ora europea.
+📌 Il bonus non può essere prelevato.
+
+⚠️ AVVISO IB
+Devi rimanere registrato sotto il nostro IB per usare il bot.
+❗ Se cambi IB dopo l’attivazione verrai rimosso automaticamente.
+
+📈 INTERESSE COMPOSTO
+Lasciare il capitale senza prelevare attiva l’effetto interesse composto.
+⚠️ Non è un consiglio finanziario.
+
+🎥 VIDEO GUIDE
+Prelievo: https://youtube.com/shorts/H3ww7mf1W5s
+
+📢 CANALE CLIENTI
+👉 https://t.me/+B4B1GKoSTXY0ZDE0
+
+📸 CONFERMA FINALE
+Mandami uno screenshot così verifico che tutto sia impostato correttamente 👍"""
+
 DEFAULT_WELCOME_MESSAGE = "Ciao 👋 Benvenuto in XAU Machine!\n\nPer iniziare: registrati su PU Prime dal link ufficiale, completa la verifica del documento e scrivimi nome e cognome. Ti guiderò poi nell'apertura del conto corretto: Copy Popular Trading, Standard, valuta EUR e nessun voucher.\n\nHai già PU Prime? Scrivimi prima di procedere: ti guido nel trasferimento IB."
 
 # ---------------------------------------------------------- richieste MT5
@@ -1834,6 +1891,18 @@ def enforce_customer_reply_rules(reply: str, puprime: dict | None, language: str
     text = (reply or "").strip()
     status = str((puprime or {}).get("status") or "")
     if status != "matched":
+        # An LLM must never turn an unverified conversation into an IB
+        # confirmation.  This catches stale/contradictory CRM prompt text too.
+        unsupported_confirmation = re.search(
+            r"(?:risult[ai].{0,35}collegat|ti\s+(?:trovo|vedo).{0,35}(?:registrat|collegat)|"
+            r"account.{0,30}collegat|verificat[oa].{0,30}(?:ib|pu\s*prime))",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if unsupported_confirmation:
+            if language == "en":
+                return "Please send your PU Prime account number or user ID so I can verify the connection to our IB."
+            return "Inviami il numero conto o l'ID utente PU Prime: così posso verificare il collegamento al nostro IB."
         text = re.sub(
             r"\bNEXORA(?:\s+AI)?(?:\s+CLAUDE)?(?:\s+\d+)?\b",
             "the copy-trading strategy" if language == "en" else "la strategia di copy trading",
@@ -1923,6 +1992,11 @@ def richiede_verifica_puprime(testo: str) -> bool:
         "id utente", "registrato", "registrata", "verifica", "collegato", "collegata",
     )
     return any(term in normalized for term in verification_terms)
+
+
+def richiede_guida_puprime(testo: str) -> bool:
+    normalized = re.sub(r"\s+", " ", (testo or "").casefold()).strip()
+    return any(term in normalized for term in ("guida", "guide", "come attacco", "attivare il bot", "attivazione bot"))
 
 async def track_start(update: Update, deep_link_code: str):
     if not CRM_TRACKING_SECRET or not update.effective_user or not update.effective_chat:
@@ -2136,10 +2210,44 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if verifica_puprime:
         contesto["puprime"] = await crm_puprime_context(update, testo)
     esito_puprime = str((contesto.get("puprime") or {}).get("status") or "")
+    if verifica_puprime:
+        # Keep an audit signal without logging customer data.  A client-facing
+        # confirmation is allowed only for this explicit CRM result.
+        log.info("PU Prime lookup completed: status=%s", esito_puprime or "missing")
+        if esito_puprime == "matched":
+            context.user_data["puprime_verified"] = True
+        elif esito_puprime:
+            context.user_data.pop("puprime_verified", None)
+
+    if richiede_guida_puprime(testo):
+        if context.user_data.get("puprime_verified"):
+            await msg.reply_text(PU_PRIME_GUIDE_IT, disable_web_page_preview=True)
+            await record_message(update, "out", "Guida ufficiale PU Prime inviata dopo verifica CRM riuscita.", "ai")
+        else:
+            risposta_guida = (
+                "Prima devo verificare il collegamento al nostro IB. Inviami il numero conto o l'ID utente PU Prime."
+            )
+            await msg.reply_text(risposta_guida)
+            await record_message(update, "out", risposta_guida, "ai")
+        return
+
     # A bare name is a request for a factual IB lookup. Do not delegate it to
-    # the model: it used to hallucinate a completed operator handoff when no
-    # real lookup match (or notification) existed.
+    # the model: it used to hallucinate confirmation or a completed handoff.
     if sembra_nominativo_puprime(testo):
+        if esito_puprime == "matched":
+            risposta_lookup = (
+                "Perfetto, il collegamento al nostro IB è verificato ✅ Scrivimi “guida” e ti invio i passaggi ufficiali."
+            )
+            await msg.reply_text(risposta_lookup)
+            await record_message(update, "out", risposta_lookup, "ai")
+            return
+        if esito_puprime == "ambiguous":
+            risposta_lookup = (
+                "Trovo più clienti con questo nome. Inviami il numero conto o l'ID utente PU Prime per verificare quello corretto."
+            )
+            await msg.reply_text(risposta_lookup)
+            await record_message(update, "out", risposta_lookup, "ai")
+            return
         if esito_puprime == "not_found":
             risposta_lookup = (
                 "I can’t find this name linked to our IB at the moment. Please send your PU Prime account number or user ID and I’ll check that."
