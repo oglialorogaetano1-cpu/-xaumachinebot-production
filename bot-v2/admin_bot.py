@@ -85,6 +85,9 @@ follow-up. Se chiede l'elenco dei follow-up, invitalo a usare /followup_list.
 Se vuole un follow-up personalizzato, invitalo a usare
 /followup @username | obiettivo: il comando legge lo storico CRM, rileva la
 lingua del cliente, prepara una bozza e richiede /conferma prima dell'invio.
+Se chiede in chat libera di creare un follow-up, non dire mai che non puoi:
+rispondi che puoi farlo e chiedi soltanto username/nome del cliente e obiettivo;
+il comando /followup resta una scorciatoia facoltativa.
 I follow-up automatici programmati non hanno un testo fisso o una bozza gia'
 salvata: il testo viene generato solo alla scadenza, nella lingua del cliente e
 sulla base dell'ultima conversazione. Se l'amministratore chiede cosa verra'
@@ -1598,6 +1601,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text):
         await reply_ai_status(update, reference)
         return
     normalized = re.sub(r"\s+", " ", str(text or "").lower()).strip()
+    if "follow" in normalized and any(term in normalized for term in ("creo", "creare", "crea")):
+        reply = (
+            "Sì. Dimmi il cliente (username @... oppure nome visibile) e l'obiettivo del messaggio, "
+            "per esempio: «@mario_rossi — sollecitare il deposito iniziale». Leggerò lo storico, "
+            "preparerò una bozza nella sua lingua e ti chiederò conferma prima di inviarla. "
+            "Se preferisci puoi usare anche /followup @username | obiettivo."
+        )
+        remember(chat_id, "assistant", reply)
+        await update.effective_message.reply_text(reply)
+        return
     if (
         ("follow" in normalized or "invio programmato" in normalized)
         and any(term in normalized for term in ("cosa", "che cosa", "scritto", "scriver", "testo"))
