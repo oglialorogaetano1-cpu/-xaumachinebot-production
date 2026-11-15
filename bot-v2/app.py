@@ -1618,13 +1618,41 @@ async def smart_followup_sweep() -> None:
         try:
             history = row.get("recent_messages") or []
             instruction = str(row.get("instruction") or "").strip()
+            # The scheduler used to rely on the generic Italian instruction
+            # below.  That meant a customer who had been speaking English
+            # could receive an Italian follow-up after an otherwise correct
+            # conversation.  The latest real customer text is authoritative
+            # (not the operator's Italian notes or Telegram profile locale).
+            customer_language = str(row.get("language") or "").split("-", 1)[0].lower()
+            if not re.fullmatch(r"[a-z]{2,3}", customer_language):
+                customer_language = ""
+            if not customer_language:
+                for item in reversed(history):
+                    if not isinstance(item, dict):
+                        continue
+                    role = str(item.get("role") or item.get("sender") or "").lower()
+                    if role not in {"user", "customer", "client", "in"}:
+                        continue
+                    text = str(item.get("content") or item.get("body") or item.get("text") or "").strip()
+                    if text:
+                        customer_language = await detect_text_language(text)
+                        if customer_language:
+                            break
+            if not customer_language:
+                # Never silently default a follow-up to Italian.  English is
+                # the safe default for unknown international conversations.
+                customer_language = "en"
             request = (
-                "Scrivi SOLO il prossimo follow-up per il cliente, nella sua lingua. "
-                "Usa il contesto della conversazione e questo obiettivo: " + instruction + ". "
-                "Sii breve, naturale, non pressante; non inventare dati o risultati e non citare automazioni. "
-                "Se non e' opportuno ricontattarlo, rispondi esattamente [CANCEL]."
+                f"Write ONLY the next follow-up for the customer in {customer_language}. "
+                f"LANGUAGE IS MANDATORY: write every word in {customer_language}; do not use Italian unless the language is it. "
+                "Use the conversation context and this goal: " + instruction + ". "
+                "Be brief, natural and not pushy. Do not invent data or results and do not mention automation. "
+                "If following up is not appropriate, reply exactly [CANCEL]."
             )
-            body, _ = await genera_risposta_ai(request, {"history": history})
+            body, _ = await genera_risposta_ai(
+                request,
+                {"history": history, "customer_language": customer_language},
+            )
             cancel = body.strip() == "[CANCEL]"
             async with httpx.AsyncClient(timeout=20) as client:
                 done = await client.post(
