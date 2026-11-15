@@ -1111,9 +1111,14 @@ async def google_translate_to_italian(text: str, declared_language: str) -> tupl
         except Exception as exc:
             log.warning("Traduzione italiana Google non disponibile: %s", exc)
 
-    # Una traduzione interna deve essere verificabile. Se Google non risponde,
-    # lasciamo soltanto l'originale: un modello conversazionale non deve mai
-    # trasformare un errore in una finta traduzione o in una risposta commerciale.
+    # Google puo' essere non configurato o momentaneamente indisponibile. In
+    # quel caso usiamo la Edge Function esclusivamente come traduttore: le
+    # istruzioni di ``ai_translate_text`` impediscono testo commerciale o una
+    # risposta al cliente. Senza questo fallback il Topic mostrava l'inglese
+    # corretto ma lasciava lo staff senza la traduzione italiana.
+    italian, translated = await ai_translate_text(text, language, "Italian")
+    if translated and italian and italian.strip() != text.strip():
+        return italian, True, language
     return "", False, language
 
 
