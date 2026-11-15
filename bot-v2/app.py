@@ -1571,6 +1571,7 @@ async def smart_followup_sweep() -> None:
             log.warning("Claim follow-up non disponibile %s: %s", claimed.status_code, claimed.text[:180])
             return
         rows = claimed.json() or []
+        log.info("CRM follow-up sweep: %s elementi dovuti presi in carico", len(rows))
     except Exception as exc:
         log.warning("Claim follow-up non disponibile: %s", exc)
         return
@@ -1608,6 +1609,7 @@ async def smart_followup_sweep() -> None:
 
 
 async def poll_smart_followups() -> None:
+    log.info("CRM smart follow-up worker abilitato")
     await asyncio.sleep(12)
     while True:
         try:
