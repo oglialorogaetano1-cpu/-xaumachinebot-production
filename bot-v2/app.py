@@ -7,6 +7,7 @@ import re
 import secrets
 import signal
 import threading
+import time
 import unicodedata
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -40,6 +41,11 @@ CRM_TENANT_SLUG = os.environ.get("CRM_TENANT_SLUG", "xau-machine")
 # The CRM queue is the source of truth: polling it is safe when empty and
 # avoids silently losing scheduled follow-ups after a redeploy.
 FOLLOWUP_AUTOMATION_ENABLED = os.environ.get("FOLLOWUP_AUTOMATION_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
+# A failed Telegram delivery must never prevent later customers in the CRM
+# outbox from being processed.  Keep permanent failures out of the hot loop
+# for a day, while the CRM retains them for later review/retry.
+OUTBOX_PULL_LIMIT = max(10, min(int(os.environ.get("OUTBOX_PULL_LIMIT", "25")), 100))
+OUTBOX_FAILURE_COOLDOWN_SECONDS = max(60, int(os.environ.get("OUTBOX_FAILURE_COOLDOWN_SECONDS", "86400")))
 MT5_INVESTOR_PLATFORM = os.environ.get("MT5_INVESTOR_PLATFORM", "")
 MT5_INVESTOR_BROKER = os.environ.get("MT5_INVESTOR_BROKER", "")
 MT5_INVESTOR_SERVER = os.environ.get("MT5_INVESTOR_SERVER", "")
@@ -1501,14 +1507,21 @@ async def crm_business_connection_id(chat_id: int | str) -> str | None:
 
 async def poll_operator_outbox(app) -> None:
     headers = dict(CRM_HEADERS); headers.pop("Prefer", None)
+    failed_recently: dict[str, float] = {}
     await asyncio.sleep(3)
     while True:
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 r = await client.post(f"{SUPABASE_URL}/rest/v1/rpc/crm_pull_pending_outbox", headers=headers,
-                    json={"p_secret": CRM_TRACKING_SECRET, "p_tenant_slug": CRM_TENANT_SLUG, "p_limit": 10})
+                    json={"p_secret": CRM_TRACKING_SECRET, "p_tenant_slug": CRM_TENANT_SLUG, "p_limit": OUTBOX_PULL_LIMIT})
             rows = r.json() if r.status_code < 300 else []
             for row in rows or []:
+                outbox_id = str(row.get("id") or "")
+                failed_at = failed_recently.get(outbox_id)
+                if failed_at and time.monotonic() - failed_at < OUTBOX_FAILURE_COOLDOWN_SECONDS:
+                    # The row remains in CRM for audit/retry, but it must not
+                    # occupy every pull and starve newer deliverable messages.
+                    continue
                 success = False
                 error_text = None
                 try:
@@ -1526,6 +1539,8 @@ async def poll_operator_outbox(app) -> None:
                         await forward_followup_to_topic(app, row)
                 except Exception as exc:
                     error_text = str(exc)
+                    if outbox_id:
+                        failed_recently[outbox_id] = time.monotonic()
                     log.warning("Invio messaggio operatore %s fallito: %s", row.get("id"), exc)
                 try:
                     async with httpx.AsyncClient(timeout=10) as client:
@@ -1544,6 +1559,10 @@ async def poll_operator_outbox(app) -> None:
                         log.warning("ACK coda %s fallito: %s", row.get("id"), ack.text[:200])
                 except Exception as exc:
                     log.warning("ACK coda %s non disponibile: %s", row.get("id"), exc)
+                # Keep a safe Telegram delivery pace when a catch-up batch is
+                # present; this is still quick enough to drain the queue.
+                if success:
+                    await asyncio.sleep(0.15)
         except Exception as exc:
             log.warning("Polling coda operatore fallito: %s", exc)
         await asyncio.sleep(5)
