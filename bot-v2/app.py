@@ -5,6 +5,7 @@ import hashlib
 import logging
 import re
 import secrets
+import signal
 import threading
 import unicodedata
 from datetime import datetime, timezone
@@ -2858,7 +2859,39 @@ async def post_init(app):
     app.create_task(poll_operator_outbox(app), name="crm-operator-outbox")
     app.create_task(poll_signal_room_expirations(app), name="signal-room-24h-enforcement")
     app.create_task(poll_puprime_notifications(app), name="puprime-admin-notifications")
+    app.create_task(telegram_connectivity_watchdog(app), name="telegram-connectivity-watchdog")
     log.info("Signal room 24h enforcement enabled for %s", SIGNAL_ROOM_URL)
+
+async def telegram_connectivity_watchdog(app: Application) -> None:
+    """Restart the container after a sustained Telegram API outage.
+
+    ``run_polling`` retries transient polling errors itself.  This watchdog
+    covers the failure mode where the API client is no longer usable for an
+    extended period: Railway's ``Always`` restart policy then starts a clean
+    polling session without an operator having to intervene.
+    """
+    consecutive_failures = 0
+    while True:
+        await asyncio.sleep(60)
+        try:
+            await app.bot.get_me()
+            consecutive_failures = 0
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            consecutive_failures += 1
+            log.warning(
+                "Telegram connectivity check failed (%s/3): %s",
+                consecutive_failures,
+                exc,
+            )
+            if consecutive_failures >= 3:
+                log.error(
+                    "Telegram API unavailable for 3 consecutive checks; "
+                    "terminating so Railway can restart the polling service"
+                )
+                os.kill(os.getpid(), signal.SIGTERM)
+                return
 
 def main():
     threading.Thread(target=start_health_server, daemon=True, name="health-server").start()
