@@ -702,6 +702,18 @@ async def crm_get(path, params):
     return data if isinstance(data, list) else []
 
 
+async def crm_rpc(name, payload):
+    """Call a CRM RPC protected by the tenant runtime secret."""
+    async with httpx.AsyncClient(timeout=20) as client:
+        r = await client.post(
+            f"{SUPABASE_URL}/rest/v1/rpc/{name}",
+            headers=supabase_headers(),
+            json=payload,
+        )
+    r.raise_for_status()
+    return r.json()
+
+
 async def resolve_customer_reference(reference):
     """Resolve @username/name to the private Telegram chat without exposing IDs.
 
@@ -1064,21 +1076,15 @@ async def list_followups(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not authorized(update):
         return
     try:
-        rules, pending, leads = await asyncio.gather(
-            crm_get("crm_followup_rules", {
-                "select": "id,name,trigger_event,lead_status,delay_minutes,channel,enabled,updated_at",
-                "order": "updated_at.desc",
-                "limit": "100",
-            }),
-            crm_get("crm_followups", {
-                "select": "id,lead_id,sequence_key,step_number,scheduled_for,channel,attempts,created_at",
-                "sent_at": "is.null",
-                "cancelled_at": "is.null",
-                "order": "scheduled_for.asc",
-                "limit": "100",
-            }),
-            crm_get("crm_leads", {"select": "id,full_name,username,telegram_username", "limit": "1000"}),
-        )
+        overview = await crm_rpc("crm_admin_followup_overview_from_telegram", {
+            "p_secret": CRM_SECRET,
+            "p_tenant_slug": TENANT_SLUG,
+        })
+        if not isinstance(overview, dict):
+            raise RuntimeError("Risposta CRM non valida per follow-up")
+        rules = overview.get("rules") or []
+        pending = overview.get("pending") or []
+        leads = overview.get("leads") or []
     except Exception:
         log.exception("Follow-up list unavailable")
         await update.effective_message.reply_text("⚠️ Non riesco a leggere i follow-up dal CRM in questo momento.")
