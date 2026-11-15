@@ -1526,11 +1526,29 @@ async def poll_operator_outbox(app) -> None:
                 error_text = None
                 try:
                     business_connection_id = await crm_business_connection_id(row["telegram_chat_id"])
-                    await app.bot.send_message(
-                        chat_id=row["telegram_chat_id"],
-                        text=row["body"],
-                        business_connection_id=business_connection_id,
-                    )
+                    try:
+                        await app.bot.send_message(
+                            chat_id=row["telegram_chat_id"],
+                            text=row["body"],
+                            business_connection_id=business_connection_id,
+                        )
+                    except Exception as business_exc:
+                        # A Telegram Business connection can expire while the
+                        # client is still reachable by the support bot.  Fall
+                        # back to the normal bot route instead of leaving the
+                        # customer behind a stale Business connection.
+                        if business_connection_id and "business_connection_invalid" in str(business_exc).lower():
+                            log.warning(
+                                "Connessione Business non valida per %s; invio diretto di ripiego",
+                                row.get("id"),
+                            )
+                            await app.bot.send_message(
+                                chat_id=row["telegram_chat_id"],
+                                text=row["body"],
+                            )
+                            business_connection_id = None
+                        else:
+                            raise
                     success = True
                     log.info("Messaggio operatore inviato su Telegram: %s", row.get("id"))
                     # Nel gruppo di supporto mostriamo soltanto le chat gestite
