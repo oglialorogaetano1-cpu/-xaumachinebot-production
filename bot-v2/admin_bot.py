@@ -381,7 +381,12 @@ async def openai_json(chat_id, text):
     except json.JSONDecodeError:
         start, end = candidate.find("{"), candidate.rfind("}")
         if start < 0 or end <= start:
-            raise
+            # A provider can occasionally disregard the structured-output
+            # instruction and send a normal assistant reply.  It is still a
+            # usable response; treat it as conversation only and never infer
+            # or execute a change from unstructured text.
+            log.warning("AI returned non-JSON text; serving it without actions")
+            return {"reply": candidate, "change": None}
         return json.loads(candidate[start : end + 1])
 
 
