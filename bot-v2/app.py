@@ -2157,6 +2157,58 @@ def requested_customer_language(text: str) -> str:
     return ""
 
 
+def requires_manual_referral_handoff(text: str) -> bool:
+    """Return True for referral/affiliate conversations owned by the operator.
+
+    Referral economics and bringing other people into the service are never
+    handled by the AI.  The wording intentionally covers Italian and English
+    phrases plus common partial stems, so the rule also catches natural
+    variants such as "can I refer friends?" and "quanto guadagno se porto
+    gente?".
+    """
+    normalized = re.sub(r"\s+", " ", (text or "").casefold()).strip()
+    direct_markers = (
+        "referral", "refer a friend", "refer friends", "referring", "affiliate",
+        "affilia", "ambassador", "partner program", "introduce clients",
+        "invite friends", "bring friends", "bring people", "bring clients",
+        "porta amici", "portare amici", "porto amici", "portare gente",
+        "portare persone", "segnalare amici", "segnalazioni", "programma referral",
+        "programma affilia", "guadagnare con gli amici", "guadagno se porto",
+        "commissioni per", "commissione per", "earn by referring",
+        "earn from referrals", "earn money referring",
+    )
+    if any(marker in normalized for marker in direct_markers):
+        return True
+    people_words = ("friend", "friends", "client", "clients", "amici", "gente", "persone")
+    earnings_words = ("earn", "earning", "commission", "guadagn", "commissione", "commissioni")
+    return any(word in normalized for word in people_words) and any(word in normalized for word in earnings_words)
+
+
+async def stop_ai_for_referral_request(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
+    """Persist a human-only handoff and notify the administrator without replying."""
+    chat = update.effective_chat
+    user = update.effective_user
+    if not chat:
+        return
+    await record_message(update, "in", text, "lead")
+    result = await crm_set_ai_control(chat.id, "stop")
+    if not result.get("ok"):
+        log.warning("Stop AI referral non confermato dal CRM per chat %s", chat.id)
+    if ADMIN_CHAT_ID:
+        try:
+            await context.bot.send_message(
+                chat_id=int(ADMIN_CHAT_ID),
+                text=(
+                    "🔕 Referral / partnership: AI fermata — risposta manuale richiesta\n"
+                    f"Cliente: {user.full_name if user else '—'} · @{user.username if user and user.username else '—'}\n"
+                    f"Chat: {chat.id}\n"
+                    f"Messaggio: {text[:2500]}"
+                ),
+            )
+        except Exception as exc:
+            log.warning("Notifica admin referral non inviata: %s", exc)
+
+
 def language_switch_confirmation(language: str) -> str:
     messages = {
         "it": "Certo, da ora ti rispondo in italiano. 🇮🇹",
@@ -2339,6 +2391,13 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await record_message(update, "in", testo, "lead")
         return
     testo_lower = testo.lower()
+    # Referral, commission and partnership requests are always human-owned.
+    # Do this before every automated flow: the customer receives no bot reply,
+    # the CRM state is stopped permanently for the chat, and the operator gets
+    # the complete message in the admin bot.
+    if not is_admin_chat(update.effective_chat.id) and requires_manual_referral_handoff(testo):
+        await stop_ai_for_referral_request(update, context, testo)
+        return
     categorie_richieste = (
         any(x in testo_lower for x in ("come funziona il bot", "bot automatico", "copy trading")),
         any(x in testo_lower for x in ("rischi", "rischio", "risk")),
