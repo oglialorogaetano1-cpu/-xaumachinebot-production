@@ -1970,6 +1970,10 @@ def sembra_nominativo_puprime(testo: str) -> bool:
     # name.  Without this guard it was routed into the PU Prime lookup flow.
     if requested_customer_language(testo):
         return False
+    # A question or sentence fragment must never be treated as a person's
+    # name. This previously routed "In che senso?" to PU Prime verification.
+    if any(mark in (testo or "") for mark in "?!.,;:"):
+        return False
     pulito = re.sub(r"[^A-Za-zÀ-ÖØ-öø-ÿ' -]", " ", testo or "").strip()
     parole = [p for p in pulito.split() if len(p) >= 2]
     if not 2 <= len(parole) <= 4:
@@ -1977,6 +1981,8 @@ def sembra_nominativo_puprime(testo: str) -> bool:
     esclusioni = {
         "come", "funziona", "copy", "trading", "voglio", "sapere", "conto",
         "sono", "gia", "registrato", "registrata", "fatto", "grazie", "perche",
+        "in", "che", "senso", "non", "capito", "puoi", "parli", "parlare",
+        "italiano", "inglese", "english", "please", "help", "ciao", "buongiorno",
     }
     return not any(p.lower() in esclusioni for p in parole)
 
