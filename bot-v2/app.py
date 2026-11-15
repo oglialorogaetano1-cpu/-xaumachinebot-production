@@ -32,7 +32,10 @@ GLOBAL_AI_CONTROL_CHAT_ID = 0
 # Le risposte dirette ai clienti sono abilitate separatamente dai follow-up:
 # riattivare il bot non deve riavviare campagne o solleciti automatici.
 CUSTOMER_AUTO_REPLY_ENABLED = os.environ.get("CUSTOMER_AUTO_REPLY_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
-FOLLOWUP_AUTOMATION_ENABLED = os.environ.get("FOLLOWUP_AUTOMATION_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
+# The CRM queue is the source of truth and is safe to poll even when empty.
+# Defaulting to enabled prevents a redeploy or a missing Railway variable from
+# silently disabling every scheduled customer follow-up.
+FOLLOWUP_AUTOMATION_ENABLED = os.environ.get("FOLLOWUP_AUTOMATION_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
 # Explicitly suspended until a dedicated customer-facing account and approved
 # credentials are configured. This blocks all automatic showcase/history flows.
 SHOWCASE_ACCESS_ENABLED = False
