@@ -13,6 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import httpx
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import Conflict
 from telegram.ext import Application, ApplicationHandlerStop, CallbackQueryHandler, ChatJoinRequestHandler, ChatMemberHandler, CommandHandler, MessageHandler, ContextTypes, filters
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -2208,8 +2209,14 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mapping = await crm_topic_lookup(telegram_user_id=update.effective_user.id) if update.effective_user else {}
     contesto["customer_language"] = str(mapping.get("language") or "").split("-", 1)[0].lower()
     verifica_puprime = richiede_verifica_puprime(testo)
-    if verifica_puprime:
-        contesto["puprime"] = await crm_puprime_context(update, testo)
+    richiesta_guida = richiede_guida_puprime(testo)
+    # PTB user_data is process memory and disappears after every restart.
+    # Re-read the authoritative CRM association on a guide request as well.
+    if verifica_puprime or richiesta_guida:
+        contesto["puprime"] = await crm_puprime_context(
+            update,
+            testo if verifica_puprime else "",
+        )
     esito_puprime = str((contesto.get("puprime") or {}).get("status") or "")
     if verifica_puprime:
         # Keep an audit signal without logging customer data.  A client-facing
@@ -2217,13 +2224,20 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log.info("PU Prime lookup completed: status=%s", esito_puprime or "missing")
         if esito_puprime == "matched":
             context.user_data["puprime_verified"] = True
-        elif esito_puprime:
+        elif esito_puprime in {"not_found", "ambiguous"}:
             context.user_data.pop("puprime_verified", None)
 
-    if richiede_guida_puprime(testo):
-        if context.user_data.get("puprime_verified"):
+    if richiesta_guida:
+        if esito_puprime == "matched":
             await msg.reply_text(PU_PRIME_GUIDE_IT, disable_web_page_preview=True)
             await record_message(update, "out", "Guida ufficiale PU Prime inviata dopo verifica CRM riuscita.", "ai")
+        elif esito_puprime == "unavailable":
+            risposta_guida = (
+                "La verifica PU Prime non è disponibile in questo momento. Il tuo stato non è stato cancellato: "
+                "riprova tra poco oppure inviami il numero conto o l'ID utente."
+            )
+            await msg.reply_text(risposta_guida)
+            await record_message(update, "out", risposta_guida, "ai")
         else:
             risposta_guida = (
                 "Prima devo verificare il collegamento al nostro IB. Inviami il numero conto o l'ID utente PU Prime."
@@ -2800,6 +2814,12 @@ async def on_error(update, context: ContextTypes.DEFAULT_TYPE):
     """Rete di sicurezza: qualunque eccezione non prevista finisce qui
     invece di far cadere il processo o restare silenziosa nei log."""
     log.error("Aggiornamento non gestito: %s", update, exc_info=context.error)
+    # Telegram allows one getUpdates consumer for a bot token. Do not leave a
+    # conflicted poller alive: Railway's Always restart policy will restore a
+    # clean polling session automatically.
+    if isinstance(context.error, Conflict):
+        log.error("Telegram polling conflict detected; restarting this instance")
+        os.kill(os.getpid(), signal.SIGTERM)
 
 async def sync_commercial_release_to_crm() -> None:
     """Mirror the exact customer ZIP to private CRM storage at every deploy."""
