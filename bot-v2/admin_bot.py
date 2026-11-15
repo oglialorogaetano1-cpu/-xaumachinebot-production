@@ -85,6 +85,12 @@ follow-up. Se chiede l'elenco dei follow-up, invitalo a usare /followup_list.
 Se vuole un follow-up personalizzato, invitalo a usare
 /followup @username | obiettivo: il comando legge lo storico CRM, rileva la
 lingua del cliente, prepara una bozza e richiede /conferma prima dell'invio.
+I follow-up automatici programmati non hanno un testo fisso o una bozza gia'
+salvata: il testo viene generato solo alla scadenza, nella lingua del cliente e
+sulla base dell'ultima conversazione. Se l'amministratore chiede cosa verra'
+scritto senza indicare un cliente, spiega questo meccanismo e mostra che puo'
+vedere regola, segmento e orario con /followup_list. Non dire mai che
+/followup_list mostra bozze gia' generate.
 Se una ricerca non e' univoca, chiedi solo username, nome visibile
 o di inoltrare la chat/Topic. reply e' obbligatorio:
 deve essere una risposta conversazionale utile e completa alla domanda, mai
@@ -1122,7 +1128,7 @@ async def list_followups(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines.extend([
         "",
         "Per preparare un messaggio personalizzato: /followup @username | obiettivo",
-        "Il bot rilegge la conversazione, rileva la lingua e ti chiede /conferma prima dell'invio.",
+        "Nota: gli invii automatici non hanno una bozza fissa; il testo viene generato alla scadenza nella lingua del cliente, in base allo storico piu' recente.",
     ])
     await update.effective_message.reply_text("\n".join(lines)[:4000])
 
@@ -1590,6 +1596,20 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text):
     reference = ai_status_reference(text)
     if reference:
         await reply_ai_status(update, reference)
+        return
+    normalized = re.sub(r"\s+", " ", str(text or "").lower()).strip()
+    if (
+        ("follow" in normalized or "invio programmato" in normalized)
+        and any(term in normalized for term in ("cosa", "che cosa", "scritto", "scriver", "testo"))
+    ):
+        reply = (
+            "L'invio automatico non ha un testo fisso gia' salvato. Alla scadenza il bot rilegge "
+            "l'ultima conversazione, usa la lingua del cliente e genera un messaggio breve e contestuale. "
+            "Con /followup_list vedi cliente, regola e orario; per vedere una bozza prima dell'invio di "
+            "un cliente specifico usa /followup @username | obiettivo."
+        )
+        remember(chat_id, "assistant", reply)
+        await update.effective_message.reply_text(reply)
         return
     direct_change = natural_verified_customer_request(text)
     if direct_change:
