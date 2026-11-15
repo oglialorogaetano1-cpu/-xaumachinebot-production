@@ -1966,6 +1966,10 @@ def sembra_nominativo_puprime(testo: str) -> bool:
     This prevents the AI from pretending that a name was checked or handed off
     when the authoritative PU Prime lookup says otherwise.
     """
+    # A request such as "Puoi parlare in italiano?" is never a customer
+    # name.  Without this guard it was routed into the PU Prime lookup flow.
+    if requested_customer_language(testo):
+        return False
     pulito = re.sub(r"[^A-Za-zÀ-ÖØ-öø-ÿ' -]", " ", testo or "").strip()
     parole = [p for p in pulito.split() if len(p) >= 2]
     if not 2 <= len(parole) <= 4:
@@ -1975,6 +1979,47 @@ def sembra_nominativo_puprime(testo: str) -> bool:
         "sono", "gia", "registrato", "registrata", "fatto", "grazie", "perche",
     }
     return not any(p.lower() in esclusioni for p in parole)
+
+
+def requested_customer_language(text: str) -> str:
+    """Return an explicitly requested reply language, never a guessed one."""
+    normalized = re.sub(r"[^a-zà-öø-ÿ]+", " ", (text or "").casefold()).strip()
+    if not normalized:
+        return ""
+    languages = {
+        "it": ("italiano", "italian"),
+        "en": ("inglese", "english"),
+        "es": ("spagnolo", "espanol", "español", "spanish"),
+        "fr": ("francese", "french"),
+        "de": ("tedesco", "german", "deutsch"),
+        "pt": ("portoghese", "portuguese"),
+        "ar": ("arabo", "arabic"),
+        "ro": ("rumeno", "romanian"),
+    }
+    request_terms = (
+        "parla", "parlare", "speak", "talk", "reply", "respond",
+        "rispondi", "scrivi", "write", "habla", "hablar", "parlez",
+    )
+    if not any(term in normalized.split() for term in request_terms):
+        return ""
+    for code, names in languages.items():
+        if any(re.search(rf"\b{re.escape(name)}\b", normalized) for name in names):
+            return code
+    return ""
+
+
+def language_switch_confirmation(language: str) -> str:
+    messages = {
+        "it": "Certo, da ora ti rispondo in italiano. 🇮🇹",
+        "en": "Of course, I’ll reply in English from now on. 🇬🇧",
+        "es": "Claro, a partir de ahora te responderé en español. 🇪🇸",
+        "fr": "Bien sûr, je vous répondrai désormais en français. 🇫🇷",
+        "de": "Natürlich, ich antworte Ihnen ab jetzt auf Deutsch. 🇩🇪",
+        "pt": "Claro, a partir de agora responderei em português. 🇵🇹",
+        "ar": "بالتأكيد، سأرد عليك بالعربية من الآن فصاعدًا. 🇸🇦",
+        "ro": "Desigur, de acum îți voi răspunde în română. 🇷🇴",
+    }
+    return messages.get(language, "")
 
 
 def richiede_verifica_puprime(testo: str) -> bool:
@@ -2208,6 +2253,21 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     contesto = await record_message(update, "in", testo, "lead")
     mapping = await crm_topic_lookup(telegram_user_id=update.effective_user.id) if update.effective_user else {}
     contesto["customer_language"] = str(mapping.get("language") or "").split("-", 1)[0].lower()
+    requested_language = requested_customer_language(testo)
+    if requested_language and update.effective_user and update.effective_chat:
+        # An explicit customer choice overrides the initially detected
+        # conversation language and survives deploys through the CRM mapping.
+        await crm_set_customer_language(update.effective_user.id, requested_language)
+        remember_customer_language(
+            update.effective_user.id,
+            update.effective_chat.id,
+            requested_language,
+        )
+        contesto["customer_language"] = requested_language
+        confirmation = language_switch_confirmation(requested_language)
+        await msg.reply_text(confirmation)
+        await record_message(update, "out", confirmation, "ai")
+        return
     verifica_puprime = richiede_verifica_puprime(testo)
     richiesta_guida = richiede_guida_puprime(testo)
     # PTB user_data is process memory and disappears after every restart.
