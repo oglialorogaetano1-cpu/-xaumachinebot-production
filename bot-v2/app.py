@@ -1383,6 +1383,14 @@ async def forum_operator_message(update: Update, context: ContextTypes.DEFAULT_T
 
 # --- Controllo IA per chat + coda operatore CRM ---
 async def crm_ai_attiva(chat_id: int) -> bool:
+    """Return the persisted per-chat automation state, failing closed.
+
+    The CRM RPC may return either a JSON boolean or an object such as
+    ``{"active": false}``.  Treating every non-empty object as ``True`` meant
+    that ``/ferma`` was acknowledged in the Topic but the customer bot kept
+    answering.  A missing/unknown state must also be silent: it is safer to
+    leave the conversation to the operator than to send an unwanted reply.
+    """
     try:
         headers = dict(CRM_HEADERS); headers.pop("Prefer", None)
         async with httpx.AsyncClient(timeout=8) as client:
@@ -1390,10 +1398,25 @@ async def crm_ai_attiva(chat_id: int) -> bool:
                 json={"p_secret": CRM_TRACKING_SECRET, "p_tenant_slug": CRM_TENANT_SLUG,
                       "p_telegram_chat_id": chat_id})
         if r.status_code < 300:
-            return bool(r.json())
+            data = r.json()
+            if isinstance(data, bool):
+                return data
+            if isinstance(data, dict):
+                for key in ("active", "ai_active", "enabled", "is_active"):
+                    if key in data:
+                        value = data[key]
+                        return value is True or str(value).strip().lower() in {"1", "true", "yes", "on", "active"}
+                mode = str(data.get("mode") or data.get("status") or "").strip().lower()
+                if mode in {"stop", "stopped", "off", "paused", "manual", "pause_1h"}:
+                    return False
+                if mode in {"on", "active", "enabled"}:
+                    return True
+            log.warning("Stato IA CRM non riconosciuto per chat %s: %r", chat_id, data)
+            return False
+        log.warning("Controllo stato IA rifiutato %s per chat %s", r.status_code, chat_id)
     except Exception as exc:
-        log.warning("Controllo stato IA non riuscito, IA resta attiva: %s", exc)
-    return True
+        log.warning("Controllo stato IA non riuscito, IA resta ferma: %s", exc)
+    return False
 
 async def ensure_outbox_topic(app, row: dict) -> int | None:
     """Recupera o crea il Topic anche per lead nati prima dell'attivazione Forum."""
@@ -2398,6 +2421,13 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin_chat(update.effective_chat.id) and requires_manual_referral_handoff(testo):
         await stop_ai_for_referral_request(update, context, testo)
         return
+    # Check the manual-stop switch before *any* automatic shortcut.  A client
+    # may be in a guide, screenshot or IB-verification flow when the operator
+    # enters /ferma; none of those flows may answer after that command.
+    if not is_admin_chat(update.effective_chat.id) and not await crm_ai_attiva(update.effective_chat.id):
+        await record_message(update, "in", testo, "lead")
+        log.info("Risposta automatica soppressa: IA ferma per chat %s", update.effective_chat.id)
+        return
     categorie_richieste = (
         any(x in testo_lower for x in ("come funziona il bot", "bot automatico", "copy trading")),
         any(x in testo_lower for x in ("rischi", "rischio", "risk")),
@@ -2549,8 +2579,6 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text(risposta_lookup)
             await record_message(update, "out", risposta_lookup, "ai")
             return
-    if not await crm_ai_attiva(update.effective_chat.id):
-        return
     try:
         risposta, metadati = await genera_risposta_ai(testo, contesto)
     except Exception as exc:
