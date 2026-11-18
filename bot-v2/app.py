@@ -1492,7 +1492,14 @@ async def crm_ai_status(chat_id: int) -> bool | None:
                 json={"p_secret": CRM_TRACKING_SECRET, "p_tenant_slug": CRM_TENANT_SLUG,
                       "p_telegram_chat_id": chat_id})
         if r.status_code < 300:
-            return bool(r.json())
+            status = r.json()
+            if status is True:
+                return True
+            if status is False:
+                return False
+            log.warning("Stato IA CRM non valido per chat %s: %r", chat_id, status)
+            return None
+        log.warning("Controllo stato IA fallito %s per chat %s: %s", r.status_code, chat_id, r.text[:200])
     except Exception as exc:
         log.warning("Controllo stato IA non riuscito: %s", exc)
     return None
@@ -1507,7 +1514,10 @@ async def crm_ai_attiva(chat_id: int) -> bool:
     customer_enabled = await crm_ai_status(chat_id)
     if customer_enabled is not None:
         return customer_enabled
-    return True
+    # In caso di mancata conferma per il cliente, non inviare una risposta
+    # automatica: un "Ferma AI" non deve mai trasformarsi in una risposta.
+    log.warning("Stato IA non confermabile per chat %s: IA resta ferma", chat_id)
+    return False
 
 async def ensure_outbox_topic(app, row: dict) -> int | None:
     """Recupera o crea il Topic anche per lead nati prima dell'attivazione Forum."""
