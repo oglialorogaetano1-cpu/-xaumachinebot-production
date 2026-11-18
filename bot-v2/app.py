@@ -40,7 +40,10 @@ CRM_TRACKING_SECRET = os.environ.get("CRM_TRACKING_SECRET", "")
 CRM_TENANT_SLUG = os.environ.get("CRM_TENANT_SLUG", "xau-machine")
 # The CRM queue is the source of truth: polling it is safe when empty and
 # avoids silently losing scheduled follow-ups after a redeploy.
-FOLLOWUP_AUTOMATION_ENABLED = os.environ.get("FOLLOWUP_AUTOMATION_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
+# During manual-support mode the only automatic paths allowed are the Topic
+# relay and Google translations of an operator's own messages.  Follow-ups
+# must be explicitly enabled in Railway when the reviewed rules are ready.
+FOLLOWUP_AUTOMATION_ENABLED = os.environ.get("FOLLOWUP_AUTOMATION_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
 # A failed Telegram delivery must never prevent later customers in the CRM
 # outbox from being processed.  Keep permanent failures out of the hot loop
 # for a day, while the CRM retains them for later review/retry.
@@ -71,10 +74,10 @@ CUSTOMER_LANGUAGE_CACHE_PATH = Path(
 )
 _customer_language_cache_lock = threading.Lock()
 _customer_language_cache: dict[str, str] | None = None
-# Il bot clienti dedicato risponde ai nuovi contatti.  Lo stato può comunque
-# essere fermato in modo esplicito dall'amministratore con /ai_spegni.
-# Lasciamo una variabile d'ambiente per disattivarlo senza ridistribuire codice.
-AI_AUTOREPLY_ENABLED = os.environ.get("AI_AUTOREPLY_ENABLED", "true").strip().lower() in {
+# The customer AI is opt-in.  Until the prompt rules are reviewed, only the
+# Topic relay and Google translations of manual messages remain automatic.
+# It can later be intentionally enabled in Railway or via /ai_accendi.
+AI_AUTOREPLY_ENABLED = os.environ.get("AI_AUTOREPLY_ENABLED", "false").strip().lower() in {
     "1", "true", "yes", "on",
 }
 # Prevent a single unresolved exchange from generating an alert for every
